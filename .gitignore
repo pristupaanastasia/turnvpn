@@ -1,0 +1,8 @@
+/probe
+/vpsecho
+*.exe
+.idea/
+.env
+
+# other AI tools
+.proxyai/
