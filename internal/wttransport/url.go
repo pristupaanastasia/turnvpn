@@ -15,8 +15,12 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/pristupaanastasia/turnvpn/internal/okapi"
 	"github.com/pristupaanastasia/turnvpn/internal/wtframe"
 )
+
+// allowedSchemes are the URL schemes a signaling endpoint may use.
+var allowedSchemes = map[string]bool{"https": true, "wss": true, "http": true, "ws": true}
 
 // WebTransportCompression is the compression the client hardcodes for the
 // WebTransport leg (_buildUrl sets ?compression=deflate-raw when WebTransport).
@@ -52,8 +56,8 @@ func BuildSignalingURL(base string, p SignalingParams, webTransport bool) (strin
 	if err != nil {
 		return "", fmt.Errorf("wttransport: parse base: %w", err)
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return "", fmt.Errorf("wttransport: base %q is not an absolute URL", base)
+	if u.Host == "" || !allowedSchemes[u.Scheme] {
+		return "", fmt.Errorf("wttransport: base %q is not an http(s)/ws(s) URL", base)
 	}
 	q := u.Query()
 
@@ -79,7 +83,7 @@ func BuildSignalingURL(base string, p SignalingParams, webTransport bool) (strin
 	}
 	ver := p.ProtocolVersion
 	if ver == 0 {
-		ver = 5 // okapi.ProtocolVersion; duplicated to avoid an import cycle risk
+		ver = okapi.ProtocolVersion
 	}
 	q.Set("version", strconv.Itoa(ver))
 	if p.Device != "" {

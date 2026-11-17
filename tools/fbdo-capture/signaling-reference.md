@@ -140,6 +140,28 @@ session_data = { device_id:<uuid>, client_version:<apiClientVersion>,
 Чанки лежат на `https://st.vk.ru/dist/projects/vk-web/chunks/js/` (имена с хешем
 меняются при релизе — брать актуальные из рантайма).
 
+### Сигнальный URL: query-ключи (из `_buildSignalingEndpoint` + `_buildUrl`)
+
+Клиент берёт `endpoint`/`wt_endpoint` из дескриптора как базу и добавляет query.
+Источник — чанк `60828.js`. Реализовано в `internal/wttransport`.
+
+`_buildSignalingEndpoint` (идентичность), добавляет:
+- `userId` (всегда, даже 0), `entityType`, `deviceIdx` (всегда, даже 0),
+  `conversationId`, `token` (per-session из дескриптора), и опц.
+  `ispAsNo`/`ispAsOrg`/`locCc`/`locReg`.
+
+`_buildUrl` (клиент/соединение), добавляет:
+- `platform`, `appVersion`, `version` (=`protocolVersion`, 5), `device`,
+  `capabilities` (hex-флаги), `clientType`; опц. `tgt`/`recoverTs`/`partIdx`/
+  `partCount`/`peerId`.
+- **только для WebTransport:** `compression=deflate-raw` и `ua` (user-agent).
+  → WT-leg всегда `deflate-raw` (значит `wtframe`/`wtsignal` на нём = DeflateRaw).
+
+Сериализация — `URLSearchParams` (пробел → `+`, что совпадает с Go `url.Values`).
+`userId`/`entityType` берутся НЕ из `Descriptor` (там только `id`/`device_idx`/
+`token`) — `userId` = `uid` из `anonymLogin`/join-ответа; `entityType`/
+`conversationId` — из параметров разговора. Развести при dial (rung 5).
+
 ### Итог: что ещё реально нужно для pion
 
 Архитектура снята полностью. Для рабочего клиента осталось (всё из статики/кода,
