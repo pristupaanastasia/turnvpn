@@ -88,15 +88,66 @@ WebSocket. `endpoint: wss://.../ws2` — это фолбэк; основной �
 https://videowebrtc.okcdn.ru:23456/wt`. Движок читает глобальный конструктор при
 подключении (хук конструктора сработал после ре-джойна).
 
-**Формат сообщений внутри WebTransport** (как завёрнуты SDP/ICE: JSON? OK TopGun
-base64? protobuf?) — НЕ снят. WebTransport гоняет данные по
-`createBidirectionalStream()` / `datagrams`, а не `.send()`/`message`, поэтому
-WS-стайл хук их не видит; плюс содержимое попадает под приватный фильтр
-расширения. **Правильный способ** снять формат — не runtime-перехват, а
-**статический разбор JS-чанка `60828.23368b36.js`** (+ `webCallsBridge.js`):
-найти, как движок сериализует offer/answer/ICE в WT-стримы и как считает OK
-`sig`. Это делается при имплементации pion, уже без браузера. Так же из чанка
-берётся VK-`getAnonymousToken` бутстрап и формула подписи `sig`.
+### Wire-формат снят (статический разбор `60828.23368b36.js`, 2026-11-17)
+
+**Транспорт.** Движок использует WebTransport через **WebSocket-совместимую
+обёртку**: `connect()` → `new WebTransport(url)` → `await ready` → **один**
+`createBidirectionalStream()` → `writer = stream.writable.getWriter()`, чтение
+`readLoop(stream.readable)`. Наверх отдаёт события `open`/`message`/`close` как
+обычный WebSocket. (`ws2` WebSocket — тот же верхний интерфейс, другой транспорт.)
+
+**Фрейминг (эмуляция сообщений поверх байтового стрима).** Каждое сообщение:
+```
+[ length-prefix ][ payload ]
+payload = (опц. gzip/deflate)( UTF-8 строка )
+```
+- Энкодер (`am`): `TextEncoder.encode(str)` → `compress()` → длина-префикс
+  (`lengthEncoder`) + тело.
+- Декодер (`af`): копит буфер, читает `readLength()` → ждёт N байт → `decompress`
+  → `TextDecoder.decode` → строка-сообщение (их может быть несколько в одном
+  WT-чанке).
+- **Компрессия** выбирается из query-параметра URL (`gzip`/`deflate`/
+  `deflate-raw`/нет).
+→ Т.е. это **length-prefixed, опц. сжатые, UTF-8 (JSON) сообщения** — НЕ сырой
+TopGun-base64. На прикладном уровне — обычные строковые сообщения.
+
+**OK REST — подписи НЕТ.** Сборщик запроса `sQ(method, params, skipAuth)`:
+кладёт `method`, `format="JSON"`, `application_key` (=`ry.apiKey`), `session_key`
+(или `access_token`), JSON-стрингует вложенные объекты, и возвращает
+`k=encodeURIComponent(v)&...`. **Никакого `sig`/md5** (md5 в чанке отсутствует) —
+авторизация только по `session_key`/`access_token`. Это сильно упрощает pion.
+
+**`auth.anonymLogin` (точные параметры):**
+```
+method=auth.anonymLogin, application_key=<apiKey>,
+session_data = { device_id:<uuid>, client_version:<apiClientVersion>,
+                 client_type:"SDK_JS", auth_token:<callToken>, version:3 }
+```
+`callToken` — токен звонка (гостевой), из VK-стороны. Ответ кешируется
+(`session_key`, `session_secret_key`, `uid`).
+
+**Realtime-опкоды сигналинга** (строковые консты в движке) — прикладной протокол
+поверх строковых сообщений: `SIGNALLED_ACTIVE_PARTICIPANTS`,
+`SIGNALLED_SPEAKER_CHANGED`, `SIGNALLED_STALLED_PARTICIPANTS`, `TOPOLOGY_CHANGED`,
+`SPEAKER_CHANGED`, `REMOTE_TRACK_ADDED`/`REMOTE_TRACK_REMOVED`, `TRACK_REPLACED`,
+`STATE_CHANGED`, `PEER_CONNECTION_CLOSED`, `NETWORK_STATUS`, `VOLUMES_DETECTED`,
+`WAITING_HALL`/`WAIT_FOR_ADMIN`, `ANIMOJI*`, `ASR_TRANSCRIPTION`. Внутри этих
+сообщений едут SDP offer/answer и ICE. Точные JSON-схемы каждого опкода — читать
+из `60828.js` по мере имплементации (большая, но прямолинейная поверхность).
+
+**Прочее из чанка:** `patchLocalSDP(...)` — как SDK правит SDP (выбор H264/VP8/VP9,
+`red`, `rtcp-fb`); VP8-декод — libvpx в Worker (`decoder-init-fail-libvpx`).
+Чанки лежат на `https://st.vk.ru/dist/projects/vk-web/chunks/js/` (имена с хешем
+меняются при релизе — брать актуальные из рантайма).
+
+### Итог: что ещё реально нужно для pion
+
+Архитектура снята полностью. Для рабочего клиента осталось (всё из статики/кода,
+без браузера):
+1. Точные JSON-схемы realtime-опкодов (как именно завёрнуты offer/answer/ICE) —
+   дочитать обработчики в `60828.js`.
+2. VK-цепочка до `calls.getAnonymousToken` (как получить `callToken`).
+3. Реализовать: длина-префикс фрейминг + (де)компрессию над WT bidi stream.
 
 ## Приватность
 

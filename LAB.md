@@ -6,6 +6,32 @@
 
 ---
 
+## 2026-11-17 — Stage 1 ЗАКРЫТ: wire-формат снят из статики чанка 60828.js
+
+**Stage:** 1d · **Verdict:** ✅ архитектура сигналинга реверснута полностью (без браузера)
+
+Скачал публичные чанки `60828.23368b36.js` (движок) + `webCallsBridge.9c205864.js`
+и разобрал статически. Находки:
+- **Транспорт:** WebTransport в WS-совместимой обёртке — 1 `createBidirectionalStream`,
+  наверх события open/message/close как у WebSocket. ws2 WebSocket — тот же интерфейс.
+- **Фрейминг:** `[length-prefix][опц. gzip/deflate][UTF-8 payload]` на сообщение
+  (энкодер `am`/декодер `af`; компрессия из query-параметра URL). Т.е. **JSON-строки**,
+  не сырой TopGun-base64.
+- **REST-подписи НЕТ:** `sQ()` собирает `method&format=JSON&application_key&session_key&...`
+  url-encoded; `md5`/`sig` в чанке отсутствуют → авторизация только session_key. Сильно
+  упрощает pion.
+- **`auth.anonymLogin`:** `session_data{device_id,client_type:"SDK_JS",auth_token:callToken,
+  version:3}` + application_key.
+- **Realtime-опкоды:** `SIGNALLED_ACTIVE_PARTICIPANTS`, `TOPOLOGY_CHANGED`,
+  `REMOTE_TRACK_ADDED/REMOVED`, `SPEAKER_CHANGED`, `TRACK_REPLACED`, `STATE_CHANGED`…
+  — внутри них SDP/ICE. Точные JSON-схемы — дочитать из 60828.js при имплементации.
+- Бонус: `patchLocalSDP` (правка кодеков), libvpx-VP8-декод в Worker.
+- Полностью → `tools/fbdo-capture/signaling-reference.md`.
+
+**Остаток до pion (всё из кода, не браузер):** (1) JSON-схемы опкодов; (2) VK-цепочка
+до `getAnonymousToken`/callToken; (3) реализовать длина-префикс фрейминг + компрессию
+над WT. Исследовательская фаза Stage 1 завершена.
+
 ## 2026-11-17 — Stage 1 финал: сигнальный канал = WebTransport; формат — из статики
 
 **Stage:** 1d-tail · **Verdict:** ✅ транспорт подтверждён; wire-формат — задача статич. разбора
