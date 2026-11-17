@@ -2,6 +2,7 @@ package wtsignal
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -90,6 +91,67 @@ func TestPeerCloseStopsLoop(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("read loop did not exit after peer close")
+	}
+}
+
+// TestCloseWithStalledConsumer: if nobody drains Messages(), the read loop fills
+// its buffer and stalls on delivery; Close must still return promptly (it unblocks
+// the delivery via quit) rather than deadlock on <-done.
+func TestCloseWithStalledConsumer(t *testing.T) {
+	p1, p2 := net.Pipe()
+	a := New(p1, Options{})
+	b := New(p2, Options{}) // its Messages() is never read
+
+	go func() {
+		for i := 0; i < 40; i++ { // more than the 16-slot buffer
+			if err := a.Send([]byte("m")); err != nil {
+				return // sender unblocks when a is closed below
+			}
+		}
+	}()
+	time.Sleep(100 * time.Millisecond) // let the buffer fill and delivery stall
+
+	done := make(chan error, 1)
+	go func() { done <- b.Close() }()
+	select {
+	case <-done:
+		// Close returned — no deadlock.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close hung while the consumer was not draining Messages")
+	}
+	a.Close() // release the blocked sender goroutine
+}
+
+// fakeStream yields a fixed chunk once, then io.EOF.
+type fakeStream struct {
+	data []byte
+	done bool
+}
+
+func (f *fakeStream) Read(p []byte) (int, error) {
+	if f.done {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data)
+	f.done = true
+	return n, nil
+}
+func (f *fakeStream) Write(p []byte) (int, error) { return len(p), nil }
+func (f *fakeStream) Close() error                { return nil }
+
+// TestTruncatedFrameIsError: EOF arriving mid-frame is reported as an error, not a
+// clean shutdown.
+func TestTruncatedFrameIsError(t *testing.T) {
+	// Length prefix declaring 10 bytes, but only 3 payload bytes then EOF.
+	partial := wtframe.AppendUvarint(nil, 10)
+	partial = append(partial, 1, 2, 3)
+	c := New(&fakeStream{data: partial}, Options{})
+
+	// Drain until the channel closes.
+	for range c.Messages() {
+	}
+	if err := c.Err(); err != io.ErrUnexpectedEOF {
+		t.Errorf("truncated frame: Err = %v, want ErrUnexpectedEOF", err)
 	}
 }
 

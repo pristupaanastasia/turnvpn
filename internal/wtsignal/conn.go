@@ -28,6 +28,7 @@ type Conn struct {
 	writeMu sync.Mutex
 
 	messages chan []byte
+	quit     chan struct{} // closed by Close to unblock a stalled message delivery
 	done     chan struct{} // closed when the read loop has exited
 
 	closeOnce sync.Once
@@ -52,6 +53,7 @@ func New(stream io.ReadWriteCloser, opts Options) *Conn {
 		enc:      wtframe.Encoder{Compression: opts.Compression},
 		dec:      &wtframe.Decoder{Compression: opts.Compression, MaxMessage: opts.MaxMessage},
 		messages: make(chan []byte, 16),
+		quit:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
 	go c.readLoop()
@@ -82,9 +84,10 @@ func (c *Conn) Close() error {
 	var cerr error
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
-		cerr = c.stream.Close()
+		close(c.quit)           // unblock a message delivery stalled on a full channel
+		cerr = c.stream.Close() // unblock a pending Read
 	})
-	<-c.done // readLoop unblocks once the stream is closed
+	<-c.done // readLoop has exited
 	return cerr
 }
 
@@ -113,7 +116,13 @@ func (c *Conn) readLoop() {
 		if n > 0 {
 			msgs, decErr := c.dec.Decode(buf[:n])
 			for _, m := range msgs {
-				c.messages <- m
+				// Never block forever: Close closes quit so a stalled consumer
+				// can't wedge the read loop (and thus Close itself).
+				select {
+				case c.messages <- m:
+				case <-c.quit:
+					return
+				}
 			}
 			if decErr != nil {
 				c.setErr(decErr)
@@ -121,9 +130,16 @@ func (c *Conn) readLoop() {
 			}
 		}
 		if readErr != nil {
-			// A read error is clean on EOF or when we initiated Close; otherwise
-			// it is a real transport failure worth reporting.
-			if readErr != io.EOF && !c.closed.Load() {
+			switch {
+			case c.closed.Load():
+				// Caller-initiated Close: clean stop.
+			case readErr == io.EOF:
+				// Orderly EOF is clean, unless it arrives mid-frame — then the
+				// stream was truncated, which is an error, not a clean shutdown.
+				if c.dec.Buffered() > 0 {
+					c.setErr(io.ErrUnexpectedEOF)
+				}
+			default:
 				c.setErr(readErr)
 			}
 			return
