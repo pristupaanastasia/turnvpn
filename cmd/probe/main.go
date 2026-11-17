@@ -10,9 +10,9 @@
 //  1. Allocate a relayed transport address on the TURN server.
 //  2. CreatePermission for the VPS IP, explicitly, and read the server's answer.
 //     This separates two failures a later timeout would otherwise merge:
-//       - the server forbids the peer (403) -> hard IP whitelist, path dead;
-//       - the server grants it -> data is allowed to try, so a later timeout
-//         means the egress or return leg is blocked, not the permission.
+//     - the server forbids the peer (403) -> hard IP whitelist, path dead;
+//     - the server grants it -> data is allowed to try, so a later timeout
+//     means the egress or return leg is blocked, not the permission.
 //  3. Send a probe payload THROUGH the relay toward the VPS echo server.
 //  4. Wait for the echo to come back through the relay.
 //

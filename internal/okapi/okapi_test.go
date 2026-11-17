@@ -95,6 +95,16 @@ func TestParseAPIError(t *testing.T) {
 	if err := parseAPIError([]byte(`not json`)); err != nil {
 		t.Errorf("non-JSON should yield no apiError, got %v", err)
 	}
+	// error_code as a string must still surface as an error.
+	if err := parseAPIError([]byte(`{"error_code":"42","error_msg":"x"}`)); err == nil {
+		t.Error("expected error for string error_code")
+	} else if ae, ok := err.(*apiError); !ok || ae.Code != 42 {
+		t.Errorf("string code: got %v", err)
+	}
+	// A zero string code is not an error.
+	if err := parseAPIError([]byte(`{"error_code":"0"}`)); err != nil {
+		t.Errorf(`"0" code should be no error, got %v`, err)
+	}
 }
 
 func TestDescriptorParse(t *testing.T) {

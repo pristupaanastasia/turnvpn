@@ -154,6 +154,53 @@ func TestDecoderMultipleInOneChunk(t *testing.T) {
 	}
 }
 
+// TestDecoderMaxMessage: a frame whose declared length exceeds the cap is
+// rejected before its (absent) payload is buffered — no unbounded growth, no OOM.
+func TestDecoderMaxMessage(t *testing.T) {
+	// A varint declaring ~2^40 bytes, with no payload following.
+	huge := AppendUvarint(nil, 1<<40)
+	dec := &Decoder{Compression: None, MaxMessage: 1 << 20}
+	_, err := dec.Decode(huge)
+	if err == nil {
+		t.Fatal("expected error for oversized frame length")
+	}
+	// A frame exactly at the cap is accepted.
+	enc := Encoder{Compression: None}
+	ok, _ := enc.Encode(bytes.Repeat([]byte("y"), 1<<20))
+	dec2 := &Decoder{Compression: None, MaxMessage: 1 << 20}
+	msgs, err := dec2.Decode(ok)
+	if err != nil || len(msgs) != 1 || len(msgs[0]) != 1<<20 {
+		t.Fatalf("at-cap frame: msgs=%d err=%v", len(msgs), err)
+	}
+}
+
+// TestDecoderErrorRecovery: after a frame fails to decompress, the decoder
+// consumes it and resumes with the following valid frame instead of re-failing.
+func TestDecoderErrorRecovery(t *testing.T) {
+	enc := Encoder{Compression: GZIP}
+	good, _ := enc.Encode([]byte("hello"))
+	// A frame whose payload is not valid gzip.
+	bad := AppendUvarint(nil, 4)
+	bad = append(bad, 0xde, 0xad, 0xbe, 0xef)
+
+	dec := &Decoder{Compression: GZIP}
+	msgs, err := dec.Decode(append(bad, good...))
+	if err == nil {
+		t.Fatal("expected decompress error on bad frame")
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("got %d msgs before error, want 0", len(msgs))
+	}
+	// The good frame must still decode on the next call.
+	msgs2, err := dec.Decode(nil)
+	if err != nil {
+		t.Fatalf("recovery decode: %v", err)
+	}
+	if len(msgs2) != 1 || string(msgs2[0]) != "hello" {
+		t.Fatalf("recovery: got %q", msgs2)
+	}
+}
+
 func TestParseCompression(t *testing.T) {
 	cases := map[string]Compression{
 		"gzip": GZIP, "deflate": Deflate, "deflate-raw": DeflateRaw,

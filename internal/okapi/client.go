@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
 // DefaultAPIServer is the OK API base the web client falls back to; the live
 // value can also arrive as api_server in an auth.anonymLogin response.
 const DefaultAPIServer = "https://calls.okcdn.ru"
+
+// maxResponseBytes bounds an API response body (these are small JSON payloads).
+const maxResponseBytes = 8 << 20 // 8 MiB
 
 // Protocol constants observed from the web client. These are not secrets; they
 // identify the client/protocol and may change with client releases.
@@ -75,7 +79,8 @@ func (c *Client) call(ctx context.Context, method string, p Params, skipAuth boo
 		return nil, fmt.Errorf("okapi: %s: %w", method, err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	// Bound the response: these are small JSON bodies; cap as hardening.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("okapi: %s: read body: %w", method, err)
 	}
@@ -89,15 +94,22 @@ func (c *Client) call(ctx context.Context, method string, p Params, skipAuth boo
 }
 
 // parseAPIError returns an *apiError if data is an OK error envelope, else nil.
+// It tolerates error_code encoded as either a JSON number or string so a stray
+// string code is still surfaced as an error rather than mistaken for success.
 func parseAPIError(data []byte) error {
-	var e apiError
-	if err := json.Unmarshal(data, &e); err != nil {
-		return nil // not a JSON object with error_code; let the caller decode
+	var probe struct {
+		Code json.RawMessage `json:"error_code"`
+		Msg  string          `json:"error_msg"`
 	}
-	if e.Code != 0 {
-		return &e
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return nil // not a JSON object; let the caller decode
 	}
-	return nil
+	raw := strings.TrimSpace(string(probe.Code))
+	if raw == "" || raw == "null" || raw == "0" || raw == `"0"` || raw == `""` {
+		return nil
+	}
+	code, _ := strconv.Atoi(strings.Trim(raw, `"`)) // 0 if non-numeric; message still carries it
+	return &apiError{Code: code, Msg: probe.Msg}
 }
 
 // AnonymLoginResult is the subset of auth.anonymLogin we consume.
@@ -133,8 +145,10 @@ func (c *Client) AnonymLogin(ctx context.Context, callToken, deviceID, clientVer
 		return nil, fmt.Errorf("okapi: anonymLogin: empty session_key")
 	}
 	c.SessionKey = res.SessionKey
-	if res.APIServer != "" {
-		c.APIServer = strings.TrimRight(res.APIServer, "/")
+	// Only adopt a returned api_server with an explicit http(s) scheme; a
+	// scheme-less value would break request URL construction.
+	if s := strings.TrimRight(res.APIServer, "/"); strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://") {
+		c.APIServer = s
 	}
 	return &res, nil
 }

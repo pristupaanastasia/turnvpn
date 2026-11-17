@@ -60,6 +60,12 @@ func ParseCompression(token string) Compression {
 // maxVarint is the largest value a QUIC varint can hold (62 bits).
 const maxVarint = (uint64(1) << 62) - 1
 
+// DefaultMaxMessage caps a single decoded message when a Decoder sets no
+// MaxMessage. Signaling messages are small (a few KB); the generous ceiling just
+// bounds memory against a hostile or corrupt stream (a huge length prefix, or a
+// decompression bomb).
+const DefaultMaxMessage = 16 << 20 // 16 MiB
+
 // AppendUvarint appends v as a QUIC variable-length integer to dst and returns
 // the extended slice. It panics if v exceeds the 62-bit varint range, which no
 // real message length can reach.
@@ -132,30 +138,49 @@ func (e Encoder) Encode(msg []byte) ([]byte, error) {
 // None compression.
 type Decoder struct {
 	Compression Compression
-	buf         []byte
+	// MaxMessage caps one decoded message; <=0 means DefaultMaxMessage. A frame
+	// whose declared length — or whose decompressed size — exceeds it is an error.
+	MaxMessage int
+	buf        []byte
+}
+
+func (d *Decoder) maxMessage() int {
+	if d.MaxMessage > 0 {
+		return d.MaxMessage
+	}
+	return DefaultMaxMessage
 }
 
 // Decode appends chunk to the decoder's buffer and returns every whole message
 // now available, in order. A message split across chunks stays buffered until the
 // rest arrives. Each returned payload is decompressed and owned by the caller.
+//
+// A frame whose declared length exceeds MaxMessage is rejected before its bytes
+// are buffered, so a hostile length prefix cannot grow memory without bound. On a
+// decompress failure the offending frame is consumed before the error returns, so
+// a later Decode resumes with the next frame rather than re-failing forever.
 func (d *Decoder) Decode(chunk []byte) ([][]byte, error) {
 	d.buf = append(d.buf, chunk...)
+	max := d.maxMessage()
 	var msgs [][]byte
 	for {
 		length, n, ok := readUvarint(d.buf)
 		if !ok {
 			break // prefix not fully arrived yet
 		}
+		if length > uint64(max) {
+			return msgs, fmt.Errorf("wtframe: frame length %d exceeds max %d", length, max)
+		}
 		if uint64(len(d.buf)-n) < length {
 			break // payload not fully arrived yet
 		}
 		payload := d.buf[n : n+int(length)]
-		msg, err := decompress(d.Compression, payload)
+		msg, err := decompress(d.Compression, payload, max)
+		d.buf = d.buf[n+int(length):] // consume the frame either way
 		if err != nil {
 			return msgs, err
 		}
 		msgs = append(msgs, msg)
-		d.buf = d.buf[n+int(length):]
 	}
 	// Reclaim memory once the backlog is drained so the buffer can't grow forever.
 	if len(d.buf) == 0 {
@@ -196,7 +221,7 @@ func compress(c Compression, in []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func decompress(c Compression, in []byte) ([]byte, error) {
+func decompress(c Compression, in []byte, max int) ([]byte, error) {
 	if c == None {
 		return append([]byte(nil), in...), nil
 	}
@@ -216,9 +241,14 @@ func decompress(c Compression, in []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer r.Close()
-	out, err := io.ReadAll(r)
+	// Bound the inflated size: a small compressed frame must not expand without
+	// limit (decompression bomb). Read one byte past max to detect overflow.
+	out, err := io.ReadAll(io.LimitReader(r, int64(max)+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(out) > max {
+		return nil, fmt.Errorf("wtframe: decompressed message exceeds max %d", max)
 	}
 	return out, nil
 }
