@@ -6,6 +6,36 @@
 
 ---
 
+## 2026-11-17 — Stage 1c-B: сигналинг = движок в странице (chunk 60828) + queue
+
+**Stage:** 1c-B (транспорт сигналинга) · **Verdict:** 🔶 архитектура ясна, тела OK-дескриптора ещё не сняты
+
+- **Tried:** хук `setRemoteDescription` со **стек-трейсом** + fetch/XHR/WS хук, затем
+  гостевой leave→лобби→rejoin.
+- **Result (стек offer'а):** `setRemoteDescription(offer)` ← `_setRemoteDescription`
+  ← `open` ← `_openTransport` ← **`_onJoinPart2`** (движок, чанк
+  `60828.23368b36.js`) ← `es` в **`webCallsBridge.9c205864.js`**. `answer` ←
+  `_createAnswer` (тот же чанк). → **весь WebRTC-движок в странице, НЕ в воркере.**
+- **Result (сеть на ре-джойне):** только `calls.getParticipantsByIds`,
+  **`calls.subscribeToQueue`** (realtime-очередь; на ре-джойне вернула error —
+  вероятно уже подписаны), `fb.do` (serverTime-телеметрия). **Ни одного запроса,
+  несущего SDP**, хотя offer/answer сработали.
+- **Conclusion:** offer **собирается движком локально** из OK-conversation
+  дескриптора, полученного на ПЕРВОМ джойне (`calls.getConversationByCall` +
+  `batch.call`), а realtime-события (участники, PLI, рассинхрон) идут через
+  **VK queue** (`subscribeToQueue` + `dispatchQueueEvent`/`handleQueueEvent` на
+  бридже). Классический паттерн mediasoup-подобный: сервер отдаёт transport/ICE/
+  DTLS/codec параметры как структуру, клиент строит SDP. Для pion это ХОРОШО —
+  реверсить надо JSON VK API, не сырой SDP-канал.
+- **Next (единственный оставшийся захват Stage 1):** снять **тела**
+  `calls.getConversationByCall` и `batch.call` с ПЕРВОГО джойна (там OK-дескриптор:
+  endpoint, ICE ufrag/pwd, DTLS fingerprint, codec-параметры, и как отправляется
+  answer). Нужен залогиненный home→«Войти»→«Присоединиться» с заранее вооружённым
+  fetch-хуком (same-document, hook переживает), либо инъекция хука в первые ~200мс
+  после навигации на invite-ссылку (до авто-джойна). Приватность: ответы VK API
+  несут ПЕРСДАННЫЕ (имя/screen_name/фото) — НЕ сохранять, работать только со
+  структурой сигнальных полей.
+
 ## 2026-11-17 — Stage 1c ПРОРЫВ: PeerConnection в странице, снят весь SDP-контракт
 
 **Stage:** 1c · **Verdict:** ✅ (медиа-контракт снят), 🔶 (транспорт сигналинга открыт)
