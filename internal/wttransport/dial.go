@@ -7,11 +7,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"sync"
 
 	"github.com/quic-go/webtransport-go"
 
 	"github.com/pristupaanastasia/turnvpn/internal/wtsignal"
 )
+
+// redactURL strips the query (which carries the per-session token and ua) so a
+// signaling URL can appear in errors and logs without leaking the token.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<redacted-url>"
+	}
+	return u.Scheme + "://" + u.Host + u.Path
+}
 
 // wtStream is the subset of *webtransport.Stream that streamRWC needs: a
 // read/write/close stream whose read side must be cancelled explicitly (a QUIC
@@ -43,15 +55,22 @@ type Session struct {
 	*wtsignal.Conn
 	wtSession *webtransport.Session
 	transport *webtransport.Transport
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Close closes the signaling conn (which cancels the stream read and closes the
-// stream), then the WebTransport session and transport. It joins any errors.
+// stream), then the WebTransport session and transport. It joins any errors and
+// is idempotent — later calls return the first result.
 func (s *Session) Close() error {
-	connErr := s.Conn.Close()
-	sessErr := s.wtSession.CloseWithError(0, "")
-	trErr := s.transport.Close()
-	return errors.Join(connErr, sessErr, trErr)
+	s.closeOnce.Do(func() {
+		connErr := s.Conn.Close()
+		sessErr := s.wtSession.CloseWithError(0, "")
+		trErr := s.transport.Close()
+		s.closeErr = errors.Join(connErr, sessErr, trErr)
+	})
+	return s.closeErr
 }
 
 // DialOptions tunes the WebTransport dial.
@@ -73,7 +92,7 @@ func Dial(ctx context.Context, signalingURL string, opts DialOptions) (*Session,
 	_, wtSess, err := tr.Dial(ctx, signalingURL, opts.Header)
 	if err != nil {
 		tr.Close()
-		return nil, fmt.Errorf("wttransport: dial %s: %w", signalingURL, err)
+		return nil, fmt.Errorf("wttransport: dial %s: %w", redactURL(signalingURL), err)
 	}
 
 	stream, err := wtSess.OpenStreamSync(ctx)

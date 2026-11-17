@@ -68,5 +68,21 @@ func TestStreamRWCClosesCancelRead(t *testing.T) {
 	}
 }
 
+// TestRedactURL: the token/ua query must not survive into an error string.
+func TestRedactURL(t *testing.T) {
+	in := "https://videowebrtc.okcdn.ru:23456/wt?token=SECRET&ua=UA%20x&conversationId=c"
+	got := redactURL(in)
+	want := "https://videowebrtc.okcdn.ru:23456/wt"
+	if got != want {
+		t.Errorf("redactURL = %q, want %q", got, want)
+	}
+	if bytes.Contains([]byte(got), []byte("SECRET")) {
+		t.Error("redacted URL still contains the token")
+	}
+	if r := redactURL("::not a url"); r != "<redacted-url>" {
+		t.Errorf("unparseable URL = %q, want <redacted-url>", r)
+	}
+}
+
 // Compile-time assurance that a real *webtransport.Stream satisfies wtStream.
 var _ wtStream = (*webtransport.Stream)(nil)
