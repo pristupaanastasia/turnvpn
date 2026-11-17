@@ -6,6 +6,38 @@
 
 ---
 
+## 2026-11-17 — Stage 1c-B: API-поверхность гостевого джойна + очередь = сигналинг
+
+**Stage:** 1c-B · **Verdict:** 🔶 API-поверхность снята, payload очереди ещё нет
+
+- **Tried:** чистый первый джойн анонимным гостем из лобби (имя «probe»), fetch/XHR
+  хук вооружён ДО «Присоединиться» (новая вкладка, лобби не авто-джойнит гостя
+  без имени — удобное окно для инъекции).
+- **Result — VK API гостевого джойна (по порядку):**
+  1. `utils.getReleaseVersionsInfo` — версия/poll-конфиг (`poll_interval`,
+     `release_version`, `reload_timeout`).
+  2. **`calls.getAnonymousToken`** — гостевая аутентификация (токен; тело секретно).
+  3. **`calls.subscribeToQueue`** — подписка на realtime-очередь событий.
+  4. `calls.getParticipantsByIds` (ПЕРСДАННЫЕ — не сохранять), `calls.getReactions`.
+  5. `calls.okcdn.ru/fb.do` — OK-телеметрия (`serverTime`).
+- **У гостя НЕТ** `getConversationByCall`/`batch.call` (они в залогиненном флоу).
+  → дескриптор звонка + offer-параметры для гостя приходят **через очередь**
+  (`subscribeToQueue` + её long-poll), не отдельным REST-ответом.
+- **Caveat:** вторая гостевая вкладка из того же браузера конфликтует с первой —
+  `subscribeToQueue` вернула error (дубликат-гость). Чистый payload очереди надо
+  снимать **одной** гостевой сессией (или залогиненной) без второго гостя в том же
+  профиле.
+- **Conclusion:** транспорт сигналинга = **VK queue** (`subscribeToQueue` →
+  long-poll событий). Чтобы pion завести, реверсить надо: (1) `getAnonymousToken`
+  (или залогиненный аналог), (2) `subscribeToQueue` + формат событий очереди, где
+  едет OK-дескриптор/offer-параметры и куда отправляется answer. Это последняя
+  ступень Stage 1 перед pion-join-спекой.
+- **Next:** снять **успешный** первый джойн (одна сессия) и распарсить payload
+  `subscribeToQueue` + поток очереди на предмет conversation-дескриптора, ICE/DTLS/
+  codec параметров и answer-отправки. Хук очереди: перехватить её long-poll fetch
+  (возможно, к отдельному queue-хосту) или методы `dispatchQueueEvent`/
+  `handleQueueEvent` на `Calls._bridge`.
+
 ## 2026-11-17 — Stage 1c-B: сигналинг = движок в странице (chunk 60828) + queue
 
 **Stage:** 1c-B (транспорт сигналинга) · **Verdict:** 🔶 архитектура ясна, тела OK-дескриптора ещё не сняты
