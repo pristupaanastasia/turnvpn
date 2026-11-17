@@ -27,27 +27,38 @@
 
 > Каждая стадия гейтит следующую. Не писать код стадии N, пока N-1 не зелёная.
 
-### Stage 1 — реверс сигналинга `fb.do`  ⬅️ **СЕЙЧАС ЗДЕСЬ**
-Чтобы pion зашёл в звонок, надо говорить на сигналинге звонка: кастомный base64
-(«TopGun») над `calls.okcdn.ru/fb.do` + вероятный WebSocket-канал с живым
-SDP offer/answer и trickle ICE. **Самая тяжёлая ступень, всё остальное гейтится
-на ней.**
+### Stage 1 — реверс сигналинга  ⬅️ **СЕЙЧАС ЗДЕСЬ**
+Чтобы pion зашёл в звонок, надо говорить на сигналинге. **ПЕРЕОСМЫСЛЕНО
+2026-11-17 после первой живой капчи** (см. `LAB.md`): сигналинг устроен иначе,
+чем думали.
+
+> **Ключевая находка:** `calls.okcdn.ru/fb.do` — это **телеметрия**, НЕ сигналинг
+> (периодический стат-репорт, `data=<JSON>` → `{"metrics_reported":N}`). Реальный
+> WebRTC-стек (PeerConnection + OK TopGun-сигналинг, вероятно WS к tgserver)
+> живёт в **изолированном Web Worker** — невидим для хуков страницы
+> (fetch/XHR/WebSocket/RTCPeerConnection.prototype все дали 0 SDP). Бутстрап же
+> идёт через **VK API** `web.api.vk.ru/method/...`.
+
+Задача распадается на два слоя:
 
 - [x] **1a. Capture-харнесс** — `tools/fbdo-capture/capture.js` (хук fetch+XHR+WS,
-      топ+same-origin фреймы, поллер 150ms, `__capSave()`→cap.json) +
-      `analyze/` (Go: таймлайн, декод base64, hexdump, маркеры SDP/ICE/turn).
-      Собрано, смоук-тест прошёл.
-- [ ] **1b. Снять реальный join** — пользователь запускает `capture.js` в живом
-      звонке с **настоящим 2-м участником** (аноним-гость из разлогиненной
-      обычной вкладки), сохраняет `cap.json`, гоняет `analyze`.
-- [ ] **1c. Разметить протокол** по дампу: где auth/session-токен; room/call id;
-      в каком канале едет SDP и как закодирован внутри base64-конверта; фрейминг
-      ICE (trickle: тот же канал или отдельный); счётчики/keepalive, которых ждёт
-      сервер.
-- [ ] **1d. Спецификация pion-join-клиента** — последовательность запросов и
-      формат каждого сообщения, достаточные чтобы воспроизвести handshake.
-- [ ] **1e. pion joins** — headless pion-пир заходит в звонок и негоциирует
-      audio+video сессию до состояния `connected`. **Критерий выхода Stage 1.**
+      топ+same-origin фреймы, поллер 150ms) + `analyze/` (Go). Собрано, смоук-ок.
+- [x] **1b. Снять первый живой звонок** — снято через Claude-in-Chrome
+      (залогиненный, 3 участника). Вывод: см. находку выше.
+- [x] **1c-слой-A (частично). VK API бутстрап размечен по эндпоинтам:**
+      `messages.getCurrentCalls`, `messages.getCallPreview`,
+      `calls.getConversationByCall`, `messages.getCallParticipants`, `batch.call`.
+      Осталось снять **редактированные тела** `getCallPreview`/
+      `getConversationByCall` → что именно (OK-conversation id, join-токен,
+      endpoint) передаётся воркеру.
+- [ ] **1c-слой-B. Перехват Worker'а** — обернуть `new Worker`/`SharedWorker`,
+      внутри воркер-скоупа повесить fetch/WebSocket/RTCPeerConnection хуки,
+      снять: WS к OK tgserver, SDP offer/answer, trickle ICE, формат TopGun.
+      *Тяжёлая часть, всё гейтится на ней.*
+- [ ] **1d. Спецификация pion-join-клиента** — VK API бутстрап + воркер-сигналинг
+      в одну воспроизводимую последовательность.
+- [ ] **1e. pion joins** — headless pion-пир заходит в звонок, негоциирует
+      audio+video до `connected`. **Критерий выхода Stage 1.**
 
 ### Stage 2 — proof пропускания байтов
 - [ ] Из pion-пира отправить кадры, в payload которых зашит известный маркер;

@@ -1,0 +1,118 @@
+# turnvpn — лабораторный журнал
+
+Хронология крупных стадий и находок. Новое — сверху. Формат и правила — в
+скилле `.claude/skills/lab-log`. Роудмап — в `PLAN.md`. Негативы фиксируем так же
+тщательно, как позитивы: именно они закрывают тупики.
+
+---
+
+## 2026-11-17 — Stage 1c БОЛЬШАЯ находка: fb.do = телеметрия, сигналинг в Web Worker
+
+**Stage:** 1c (разметить протокол) · **Verdict:** 🔶 переопределяет задачу
+
+Снял живой залогиненный звонок (3 участника) через Claude-in-Chrome, хук
+fetch+XHR+WebSocket + `RTCPeerConnection.prototype` в top и same-origin iframe.
+Что в основном потоке страницы реально ходит:
+
+- **`calls.okcdn.ru/fb.do`** — POST `data=<url-encoded JSON>`, **это только
+  телеметрия**: периодический (каждые ~5с) стат-репорт (`call_topology`,
+  `nack/pli/fir_sent`, `is_simulcast`, `cpu_hardware_concurrency`…), ответ
+  `{"items_responses":[{"metrics_reported":N}]}`. **Никакого SDP/ICE/join здесь
+  нет.** Это разворачивает исходное допущение «реверсить fb.do сигналинг» —
+  fb.do НЕ сигналинг.
+- **VK API бутстрап** (`web.api.vk.ru/method/...`): `messages.getCurrentCalls`,
+  `messages.getCallPreview`, `calls.getConversationByCall`,
+  `messages.getCallParticipants`, `batch.call`, `calls.getHistory`. Это слой
+  «ссылка на звонок → дескриптор OK-conversation + join-данные».
+- **Ни одного WebSocket, ни одного SDP** в основном потоке. PC-proto хук
+  (setLocal/RemoteDescription) после включения камеры (ре-негоциация) поймал
+  **0** оферов/ансеров. Главный-поток `RTCPeerConnection` существует, но в звонке
+  не участвует.
+
+**Conclusion:** весь WebRTC-стек (PeerConnection + OK-сигналинг, вероятно WS к
+tgserver) VK Звонки держит в **изолированном Web Worker** — он невидим для хуков
+страницы (fetch/XHR/WebSocket/RTCPeerConnection.prototype). Совпадает со старой
+заметкой «call's PC isolated from page JS». Реальная цель реверса распадается на
+два слоя: **(a)** VK API `getCallPreview`/`getConversationByCall` (ссылка → OK
+join-дескриптор) — виден нам, снимается редактированно; **(b)** OK TopGun
+сигналинг внутри воркера (SDP/ICE обмен) — нужен **перехват Worker'а**
+(hook `new Worker`, патч воркер-скрипта через blob), это тяжёлая часть.
+
+**Next:** (1) снять редактированные тела `getCallPreview`/`getConversationByCall`
+— понять, что именно передаётся воркеру. (2) Прототип worker-перехвата: обернуть
+`Worker`/`SharedWorker`, внутри воркера повесить те же fetch/WS хуки, снять WS к
+OK tgserver + SDP. Только после этого осмысленно писать pion-join.
+Операционка: **выходить из залогиненного звонка нельзя** — это ресетит весь
+звонок (нужен новый); ре-негоциацию ловить тумблером камеры/микро без выхода.
+
+## 2026-11-17 — Stage 1 capture: хост требует VK ID, гость — путь к handshake
+
+**Stage:** 1b (снять живой звонок) · **Verdict:** 🔶 partial
+
+- **Tried:** через Claude-in-Chrome открыл `calls.vk.ru`, вооружил capture-хук,
+  нажал «Создать встречу».
+- **Result:** «Создать встречу» (роль хоста) редиректит на `id.vk.ru/auth`
+  (`app_id=51542479`) — т.е. создание встречи требует VK ID. Аноним
+  («Без профиля ВКонтакте») доступен только для **присоединения** по ссылке.
+- **Conclusion:** снимать сигналинг будем входом **гостем по ссылке** — гость
+  делает тот же fb.do join + SDP-обмен с SFU. Логиниться в личный аккаунт
+  пользователя не будем (пароли/приватность).
+- **Next:** получить от пользователя ссылку на звонок, зайти гостем с
+  вооружённым хуком, снять cap.json, прогнать `analyze`.
+
+## 2026-11-17 — Stage 1a: capture-харнесс готов
+
+**Stage:** 1a · **Verdict:** ✅
+
+- **Tried:** собрал `tools/fbdo-capture/` — `capture.js` (хук fetch+XHR+WebSocket
+  в топ+same-origin фреймах, ре-инсталл поллером 150ms) + `analyze/` (Go: таймлайн,
+  декод base64-блобов, hexdump, маркеры SDP/ICE/turn/codec).
+- **Result:** собирается, смоук-тест на синтетическом cap.json ловит вложенный
+  base64-SDP и размечает маркеры.
+- **Conclusion:** инструмент capture→understand готов; хукаем и WebSocket, т.к.
+  живой SDP/ICE звонка вероятно едет по WS, а не только fb.do POST'ами.
+- **Next:** Stage 1b — снять реальный join.
+
+## 2026-11-17 — Vector 2 make-or-break: SFU форвардит, не транскодит
+
+**Stage:** Vector 2 gate · **Verdict:** ✅ (путь жив)
+
+- **Tried:** как аноним-гость инжектировал синтетический VP8-трек через
+  `pc.addTransceiver(canvasTrack,{direction:'sendonly'})`.
+- **Result:** VK ренеготиировал трек и раздал его другим участникам — принято и
+  форварднуто, не переэнкожено. «Нормализация» разрешения — это sender-side
+  выбор simulcast-ступеней (клиент), не SFU.
+- **Evidence:** cost/архитектура (N·M real-time транскод нереален при масштабе —
+  это selective-forwarding SFU) + эмпирическая инъекция.
+- **Conclusion:** байты в валидном VP8/H.264-кадре доходят до пира целиком.
+  Граница — браузер не умеет авторить битстрим (Chrome переэнкодит пиксели), нужен
+  нативный клиент (pion), чьи кадры SFU форвардит как есть.
+- **Next:** реверс fb.do (Stage 1), чтобы завести pion в звонок.
+
+## 2026-11-17 — Variant A (data channel как туннель): МЁРТВ
+
+**Stage:** Variant A gate · **Verdict:** ❌
+
+- **Tried:** два полностью контролируемых участника; хук `createDataChannel` +
+  `ondatachannel`, авто-отправка произвольных payload'ов при open.
+- **Result:** единственный DC — `animoji`, эфемерный (open ~3-5с на своём join,
+  потом закрывается в простое), несёт серверные 15-байтовые кадры
+  (`02 00 0X <ts> 00 00 00 00 02 a1 dd f0`). Инъекции (0 из 4+) не дошли ни до
+  кого.
+- **Conclusion:** SFU НЕ даёт прозрачный p2p байт-пайп через DC. Variant A мёртв.
+- **Next:** Vector 2 (media RTP).
+
+## 2026-11-17 — Vector 1 (TURN-реле как generic relay): МЁРТВ
+
+**Stage:** M0 / Vector 1 gate · **Verdict:** ❌
+
+- **Tried:** полная проба против VPS `<VPS>:51822` (ufw открыт, `nc`
+  извне достаёт). VK/OK TURN: Allocate ✅, CreatePermission ✅,
+  ChannelBind «<VPS>:51822» ✅.
+- **Result:** **ноль** данных через реле в обе стороны. `tcpdump` на VPS не видел
+  ничего от IP реле (3 прогона); VPS → relay addr (8 UDP) — проба не получила
+  ничего.
+- **Conclusion:** data plane реле VK/OK зафайрволен на инфру провайдера. Control
+  plane проходит для произвольного внешнего пира, но egress в открытый интернет
+  нет. Исходная идея (VK TURN как generic relay на свой VPS) НЕ работает.
+- **Next:** пивот на Variant A, затем Vector 2.
