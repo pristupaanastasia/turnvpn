@@ -10,3 +10,8 @@
 # capture dumps (short-lived call tokens — secret)
 cap.json
 **/cap*.json
+
+# captured VK/OK call credentials (ephemeral, per-session) — NEVER commit
+secrets/
+*.creds.env
+vk-creds*.env

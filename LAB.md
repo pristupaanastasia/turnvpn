@@ -6,6 +6,35 @@
 
 ---
 
+## 2026-11-17 — Stage 1 ЗАКРЫТ (почти): весь флоу сигналинга = OK API + ws2
+
+**Stage:** 1c-B / 1d · **Verdict:** ✅ архитектура полная; остался только wire-формат ws2
+
+- **Tried:** чистый одиночный гость, широкий fetch/XHR/WS хук + разбор тел `fb.do`
+  по методам.
+- **Result — РАЗГАДКА.** `fb.do` — это **OK API** (api.ok.ru-стиль). Методы за джойн:
+  `auth.anonymLogin` → session_key; `system.getInfo` → serverTime;
+  **`vchat.joinConversationByLink`** → дескриптор конференции;
+  `vchat.clientStats` ×N → телеметрия. Канал VK `subscribeToQueue` у гостя
+  возвращает **error**, а звонок работает → он для чата/реакций, НЕ медиа.
+- **`vchat.joinConversationByLink` resp = ключ ко всему:**
+  `endpoint: "wss://videowebrtc.okcdn.ru/ws2"` (**сигнальный WebSocket**),
+  `wt_endpoint: https://videowebrtc.okcdn.ru:23456/wt` (WebTransport),
+  `token`, `id`, `p2p_forbidden`, `ws_ip_addresses`,
+  `stun 90.156.236.124:19302`, `turn 90.156.236.124/.85:19302` (+cred) — те же
+  OK-реле, что и в Vector-1. Запрос: `joinLink`, `protocolVersion=5`,
+  `capabilities=6F7F`, `anonymToken`, `application_key=CGMMEJLGDIHBABABA`,
+  `session_key`.
+- **Conclusion:** SDP/ICE идут **внутри WS `ws2`** (движок открывает его с
+  закешированным конструктором WebSocket, мимо страничного хука — потому и не
+  видели SDP в HTTP). Полный флоу → `tools/fbdo-capture/signaling-reference.md`.
+  Для pion-join спека готова на 90%.
+- **Осталось (единственное):** wire-формат сообщений внутри `ws2` (JSON vs OK
+  TopGun base64) — как завёрнуты offer/answer/ICE. Нужен перехват `WebSocket`/
+  `WebTransport` ДО загрузки движка (ранняя инъекция).
+- **Приватность:** токены/креды/session_key/anonymToken/персданные — НЕ сохранены,
+  в доке всё редакт.
+
 ## 2026-11-17 — Stage 1c-B: API-поверхность гостевого джойна + очередь = сигналинг
 
 **Stage:** 1c-B · **Verdict:** 🔶 API-поверхность снята, payload очереди ещё нет

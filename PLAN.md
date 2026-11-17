@@ -56,12 +56,18 @@
       показал: **PeerConnection ЖИВЁТ В СТРАНИЦЕ**, воркер-перехват для SDP не
       нужен. **SFU = offerer, pion = answerer** (setup active, DTLS client);
       bundle 0/1/2, rtcp-mux; VP8(96)+rtx, H264×6, AV1, H265, opus(111); RID-симулкаст.
-- [ ] **1c-слой-B. Транспорт сигналинга** — offer приходит в
-      `setRemoteDescription`, но в странице нет fetch/XHR/WS с SDP. Выяснить, куда
-      уходит answer и откуда берётся offer: воркер или бридж `webCallsBridge`
-      (глобалы `Calls._bridge`/`eventBus`/`store`, `__CALLS_SDK`, `callHub`).
-      Варианты: (а) перехват `new Worker` + воркер-скоуп хуки; (б) хук методов
-      бриджа/eventBus в странице. *Теперь это ЕДИНСТВЕННЫЙ блокер pion-join.*
+- [x] **1c-слой-B. Транспорт сигналинга РАЗГАДАН** (`signaling-reference.md`).
+      `fb.do` = **OK API**. Флоу джойна: `auth.anonymLogin` → session_key;
+      `vchat.joinConversationByLink` → дескриптор SFU с
+      **`endpoint: wss://videowebrtc.okcdn.ru/ws2`** (сигнальный WS) + token +
+      STUN/TURN (`90.156.236.x:19302`); `vchat.clientStats` = телеметрия.
+      SDP/ICE идут внутри **ws2** (движок кеширует `WebSocket` → мимо хука).
+- [x] **1d. pion-join спека — на 90%** (`signaling-reference.md`): REST-бутстрап
+      (anonymToken → anonymLogin → joinConversationByLink) + ws2 + answerer-SDP.
+- [ ] **1d-tail. Wire-формат ws2** — единственный незакрытый кусок: как завёрнуты
+      offer/answer/ICE внутри `wss://.../ws2` (JSON vs OK TopGun base64). Нужен
+      перехват `WebSocket`/`WebTransport` ДО загрузки движка (ранняя инъекция в
+      document_start). Без него нельзя дописать клиент ws2.
 - [ ] **1d. Спецификация pion-join-клиента** — VK API бутстрап + воркер-сигналинг
       в одну воспроизводимую последовательность.
 - [ ] **1e. pion joins** — headless pion-пир заходит в звонок, негоциирует
