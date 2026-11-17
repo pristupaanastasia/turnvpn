@@ -48,9 +48,14 @@ func TestBuildParamsNoWebTransport(t *testing.T) {
 }
 
 func TestBuildParamsBadUID(t *testing.T) {
+	// A non-numeric uid is tolerated: proceed with userId=0 rather than abort.
 	login := &okapi.AnonymLoginResult{UID: "not-a-number"}
-	if _, _, err := buildParams(login, &okapi.Descriptor{}, config{}); err == nil {
-		t.Error("expected error for non-numeric uid")
+	p, _, err := buildParams(login, &okapi.Descriptor{}, config{})
+	if err != nil {
+		t.Fatalf("non-numeric uid should not error: %v", err)
+	}
+	if p.UserID != 0 {
+		t.Errorf("UserID = %d, want 0 for bad uid", p.UserID)
 	}
 }
 

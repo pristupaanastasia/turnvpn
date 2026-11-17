@@ -6,8 +6,9 @@
 // the same capture→understand method used for the REST layer.
 //
 // It needs a live guest call token (the VK calls.getAnonymousToken flow is not
-// yet reproduced, so pass one captured from a browser session via -token). Tokens
-// are never printed.
+// yet reproduced, so pass one captured from a browser session via -token or the
+// VKJOIN_TOKEN env var). The CLI never prints its own tokens; captured signaling
+// message content is logged quoted and length-bounded but is not itself redacted.
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
@@ -23,6 +25,9 @@ import (
 	"github.com/pristupaanastasia/turnvpn/internal/okapi"
 	"github.com/pristupaanastasia/turnvpn/internal/wttransport"
 )
+
+// httpTimeout bounds each OK API request so a stalled server cannot hang the run.
+const httpTimeout = 30 * time.Second
 
 func main() {
 	link := flag.String("link", "", "join link token from vk.ru/call/join/<token> (required)")
@@ -35,8 +40,13 @@ func main() {
 	dur := flag.Duration("duration", 30*time.Second, "how long to listen for signaling messages")
 	flag.Parse()
 
-	if *link == "" || *token == "" {
+	tok := *token
+	if tok == "" {
+		tok = os.Getenv("VKJOIN_TOKEN") // keep the token out of the process list
+	}
+	if *link == "" || tok == "" {
 		fmt.Fprintln(os.Stderr, "usage: vkjoin -link <token> -token <guest-call-token> [flags]")
+		fmt.Fprintln(os.Stderr, "       (the call token may also come from the VKJOIN_TOKEN env var)")
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -45,7 +55,7 @@ func main() {
 	defer r.Stop()
 
 	if err := run(r.Context(), config{
-		link: *link, token: *token, appKey: *appKey, deviceID: *deviceID,
+		link: *link, token: tok, appKey: *appKey, deviceID: *deviceID,
 		clientVersion: *clientVer, entityType: *entityType, video: *video, duration: *dur,
 	}); err != nil {
 		log.Fatalf("vkjoin: %v", err)
@@ -59,7 +69,7 @@ type config struct {
 }
 
 func run(ctx context.Context, cfg config) error {
-	cl := &okapi.Client{AppKey: cfg.appKey}
+	cl := &okapi.Client{AppKey: cfg.appKey, HTTP: &http.Client{Timeout: httpTimeout}}
 
 	login, err := cl.AnonymLogin(ctx, cfg.token, cfg.deviceID, cfg.clientVersion)
 	if err != nil {
@@ -80,11 +90,11 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	base := desc.WtEndpoint
 	if !useWT {
-		base = desc.Endpoint
+		// Dial only speaks WebTransport; a wss:// endpoint would just fail there.
+		return fmt.Errorf("no wt_endpoint in descriptor; WebSocket fallback not implemented")
 	}
-	sigURL, err := wttransport.BuildSignalingURL(base, params, useWT)
+	sigURL, err := wttransport.BuildSignalingURL(desc.WtEndpoint, params, true)
 	if err != nil {
 		return fmt.Errorf("build signaling url: %w", err)
 	}
@@ -96,7 +106,7 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("dial signaling: %w", err)
 	}
 	defer sess.Close()
-	log.Printf("signaling connected (compression=%s); listening %s", desc.WtEndpoint, cfg.duration)
+	log.Printf("signaling connected (compression=%d); listening %s", wttransport.CompressionFromURL(sigURL), cfg.duration)
 
 	deadline := time.After(cfg.duration)
 	for {
@@ -124,11 +134,12 @@ func run(ctx context.Context, cfg config) error {
 func buildParams(login *okapi.AnonymLoginResult, desc *okapi.Descriptor, cfg config) (wttransport.SignalingParams, bool, error) {
 	var uid int64
 	if login.UID != "" {
-		v, err := strconv.ParseInt(login.UID, 10, 64)
-		if err != nil {
-			return wttransport.SignalingParams{}, false, fmt.Errorf("parse uid %q: %w", login.UID, err)
+		if v, err := strconv.ParseInt(login.UID, 10, 64); err == nil {
+			uid = v
+		} else {
+			// Non-numeric uid is anomalous but not fatal; proceed with 0 and warn.
+			log.Printf("warning: non-numeric uid %q from anonymLogin; using userId=0", login.UID)
 		}
-		uid = v
 	}
 	p := wttransport.SignalingParams{
 		UserID:         uid,
@@ -147,15 +158,16 @@ func buildParams(login *okapi.AnonymLoginResult, desc *okapi.Descriptor, cfg con
 	return p, useWT, nil
 }
 
-// logMessage prints a captured signaling message for analysis. Signaling payloads
-// may carry tokens/SDP crypto, so this prints length and a bounded preview only.
+// logMessage prints a captured signaling message for analysis. Payloads may carry
+// tokens/SDP crypto, so it prints the length and a bounded, quoted preview — %q
+// so control bytes or a truncated UTF-8 sequence cannot garble or inject the log.
 func logMessage(msg []byte) {
 	const previewMax = 300
 	preview := msg
 	truncated := ""
 	if len(preview) > previewMax {
 		preview = preview[:previewMax]
-		truncated = fmt.Sprintf("…(+%d)", len(msg)-previewMax)
+		truncated = fmt.Sprintf("…(+%dB)", len(msg)-previewMax)
 	}
-	log.Printf("SIGNAL [%dB] %s%s", len(msg), preview, truncated)
+	log.Printf("SIGNAL [%dB] %q%s", len(msg), preview, truncated)
 }
