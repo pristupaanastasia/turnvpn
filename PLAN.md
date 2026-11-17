@@ -51,10 +51,17 @@
       Осталось снять **редактированные тела** `getCallPreview`/
       `getConversationByCall` → что именно (OK-conversation id, join-токен,
       endpoint) передаётся воркеру.
-- [ ] **1c-слой-B. Перехват Worker'а** — обернуть `new Worker`/`SharedWorker`,
-      внутри воркер-скоупа повесить fetch/WebSocket/RTCPeerConnection хуки,
-      снять: WS к OK tgserver, SDP offer/answer, trickle ICE, формат TopGun.
-      *Тяжёлая часть, всё гейтится на ней.*
+- [x] **1c-слой-A+. SDP-контракт снят целиком** (`tools/fbdo-capture/sdp-reference.md`).
+      Хук **конструктора** RTCPeerConnection (на лобби того же документа → join)
+      показал: **PeerConnection ЖИВЁТ В СТРАНИЦЕ**, воркер-перехват для SDP не
+      нужен. **SFU = offerer, pion = answerer** (setup active, DTLS client);
+      bundle 0/1/2, rtcp-mux; VP8(96)+rtx, H264×6, AV1, H265, opus(111); RID-симулкаст.
+- [ ] **1c-слой-B. Транспорт сигналинга** — offer приходит в
+      `setRemoteDescription`, но в странице нет fetch/XHR/WS с SDP. Выяснить, куда
+      уходит answer и откуда берётся offer: воркер или бридж `webCallsBridge`
+      (глобалы `Calls._bridge`/`eventBus`/`store`, `__CALLS_SDK`, `callHub`).
+      Варианты: (а) перехват `new Worker` + воркер-скоуп хуки; (б) хук методов
+      бриджа/eventBus в странице. *Теперь это ЕДИНСТВЕННЫЙ блокер pion-join.*
 - [ ] **1d. Спецификация pion-join-клиента** — VK API бутстрап + воркер-сигналинг
       в одну воспроизводимую последовательность.
 - [ ] **1e. pion joins** — headless pion-пир заходит в звонок, негоциирует

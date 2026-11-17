@@ -6,6 +6,35 @@
 
 ---
 
+## 2026-11-17 — Stage 1c ПРОРЫВ: PeerConnection в странице, снят весь SDP-контракт
+
+**Stage:** 1c · **Verdict:** ✅ (медиа-контракт снят), 🔶 (транспорт сигналинга открыт)
+
+- **Tried:** хук **конструктора** `RTCPeerConnection` (а не только прототипа),
+  вооружён на пред-джойн лобби того же документа (гостевой контекст, top-окно,
+  frames=0), затем join. Приём обхода ранней инъекции: leave→лобже→rejoin в том
+  же документе (гость — безопасно, хоста не ресетит).
+- **Result:** поймали `pcs:1` + полный SDP-обмен. **PeerConnection ЖИВЁТ В
+  СТРАНИЦЕ** (вопреки прошлой гипотезе про воркер-изоляцию WebRTC). Направление:
+  **SFU = offerer, клиент = answerer**; offer `setup:actpass` → answer
+  `setup:active` (pion = DTLS active). Снят полный структурный offer+answer
+  (эфемерные ufrag/pwd/fp/candidate/ssrc/IP и base64-fmtp заредакчены) →
+  `tools/fbdo-capture/sdp-reference.md`. Кодеки: audio opus(111)+red(63); video
+  **VP8(96)+rtx(97)**, H264 ×6, AV1(45), H265(49), red/rtx/ulpfec; bundle 0/1/2,
+  rtcp-mux; extmap rtp-stream-id/repaired → RID-симулкаст; datachannel mid:2.
+- **Evidence:** `window.__pc` хук, 2 ICE-кандидата, offer 5190B/answer 4998B.
+  Фильтр расширения режет SDP на возврате (слова fingerprint/candidate/ufrag +
+  base64) — обходили структурным парсером в странице.
+- **Conclusion:** медиа-контракт для pion известен целиком; воркер-перехват для
+  SDP НЕ нужен. Но **транспорт сигналинга всё ещё открыт**: offer приходит в
+  `setRemoteDescription`, а в странице нет fetch/XHR/WS с SDP → доставка через
+  воркер/бридж `webCallsBridge` (VK Calls SDK). Глобалы движка в странице:
+  `Calls`/`__CallsAppService` (`_bridge`, `eventBus`, `store`, `joinCallByLink`),
+  `__CALLS_SDK`, `callHub`.
+- **Next:** 1c-B — найти, КУДА уходит answer и ОТКУДА берётся offer (воркер или
+  бридж). Тогда pion-join-спека готова. Для Vector 2 answer достаточно урезать до
+  VP8+rtx+opus.
+
 ## 2026-11-17 — Stage 1c БОЛЬШАЯ находка: fb.do = телеметрия, сигналинг в Web Worker
 
 **Stage:** 1c (разметить протокол) · **Verdict:** 🔶 переопределяет задачу
