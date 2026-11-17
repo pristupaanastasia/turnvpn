@@ -6,3 +6,7 @@
 
 # other AI tools
 .proxyai/
+
+# capture dumps (short-lived call tokens — secret)
+cap.json
+**/cap*.json
