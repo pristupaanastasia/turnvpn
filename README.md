@@ -9,7 +9,8 @@
 Прокидываем обычный интернет-трафик через **whitelisted** TURN-реле звонков VK,
 чтобы машина в сети «только по белому списку» («суверенный режим») могла
 достучаться до открытого интернета. Для сети трафик выглядит как WebRTC-звонок.
-Личный исследовательский / учебный проект.
+Личный исследовательский / учебный проект; побочный эффект — возможность передавать
+данные в условиях включённых белых списков с максимальной скоростью ~25 Мбит/с.
 
 ### Как это работает
 
@@ -147,7 +148,8 @@ git-истории) ранний media-RTP подход.
 Tunnel ordinary internet traffic through the **whitelisted** TURN relays of VK
 calls, so a machine stuck in a whitelist-only network ("суверенный режим") can
 still reach the open internet. The traffic looks like a WebRTC call to the
-network. Personal research / educational.
+network. Personal research / educational; a side effect is the ability to move
+data under whitelist conditions at up to ~25 Mbit/s.
 
 ## How it works
 
