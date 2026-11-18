@@ -121,9 +121,17 @@ TURNVPN_SECRET='<тот же секрет>' TURN_CALL_TOKEN='<call-token>' ./cli
   -tunnels 2
 ```
 
-Дальше укажи браузеру (или системе) SOCKS5 `127.0.0.1:1080` с remote DNS. Держи
-браузерный звонок живым, пока туннель поднят. Без `-token` клиент берёт креды из
-подключённого в `main` провайдера (напр. решателя капчи) — его поставляешь ты.
+После запуска клиент поднимает локальный **SOCKS5-прокси на `127.0.0.1:1080`**.
+Пропиши его в браузере (или в системе) как прокси: тип **SOCKS5**, адрес
+`127.0.0.1`, порт `1080`, и включи «проксировать DNS через прокси» (remote DNS) —
+чтобы имена сайтов резолвились на VPS, а не локально (локальный DNS в шатдауне может
+быть недоступен). Пример для Firefox: *Настройки → Настройки сети → Ручная настройка
+прокси → узел SOCKS `127.0.0.1`, порт `1080`, SOCKS v5* + галочка *«Отправлять
+DNS-запросы через прокси при использовании SOCKS v5»*. После этого весь трафик
+браузера идёт через туннель. Держи браузерный звонок живым, пока туннель поднят.
+
+Без `-token` клиент берёт креды из подключённого в `main` провайдера (напр.
+решателя капчи) — его поставляешь ты.
 
 ### Статус
 
@@ -131,11 +139,6 @@ Vector 1 (TURN-реле + DTLS + SOCKS5) **работает end-to-end**: реа
 выходит через VPS по whitelisted-инфраструктуре VK, с пулом туннелей и проактивным
 рефрешем кредов. Полная история — в `PLAN.md` и `LAB.md`, включая удалённый (в
 git-истории) ранний media-RTP подход.
-
-### Дисклеймер
-
-Для обучения и личных исследований обхода цензуры. Используй только инфраструктуру и
-аккаунты, на которые у тебя есть права.
 
 ---
 
@@ -269,8 +272,3 @@ Vector 1 (TURN relay + DTLS + SOCKS5) is **working end-to-end**: real HTTPS
 browsing exits via the VPS over whitelisted VK infrastructure, with a tunnel pool
 and proactive credential refresh. See `PLAN.md` and `LAB.md` for the full history,
 including the earlier (removed) media-RTP approach kept in git history.
-
-## Disclaimer
-
-For education and personal censorship-circumvention research. Use only
-infrastructure and accounts you are authorised to use.
