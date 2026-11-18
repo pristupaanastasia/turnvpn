@@ -20,11 +20,14 @@ package vkapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Public constants from the web client (chunk webCallsBridge.js). Not secrets:
@@ -89,6 +92,48 @@ type vkError struct {
 
 func (e *vkError) Error() string { return fmt.Sprintf("vkapi: error %d: %s", e.Code, e.Msg) }
 
+// VK error codes we special-case.
+const (
+	errCodeFlood   = 9  // "Flood control"
+	errCodeCaptcha = 14 // "Captcha needed"
+)
+
+// CaptchaError means VK demands a captcha (anti-abuse). It is terminal for a
+// headless client: the captcha must be solved by a human in a browser (see
+// RedirectURI); it is NOT cleared by retrying, and must not be bypassed.
+type CaptchaError struct {
+	Code        int
+	Msg         string
+	RedirectURI string
+}
+
+func (e *CaptchaError) Error() string {
+	return fmt.Sprintf("vkapi: captcha required (error %d: %s); solve it in a browser — it cannot be retried away", e.Code, e.Msg)
+}
+
+// FloodError means VK is rate-limiting (flood control). Unlike a captcha it is
+// transient, so a polite backoff-and-retry is reasonable.
+type FloodError struct {
+	Code int
+	Msg  string
+}
+
+func (e *FloodError) Error() string {
+	return fmt.Sprintf("vkapi: flood control (error %d: %s); back off and retry", e.Code, e.Msg)
+}
+
+// classifyError maps a VK error envelope to a typed error: captcha, flood, or a
+// generic vkError.
+func classifyError(code int, msg, redirectURI string, captchaEnabled bool) error {
+	if captchaEnabled || code == errCodeCaptcha {
+		return &CaptchaError{Code: code, Msg: msg, RedirectURI: redirectURI}
+	}
+	if code == errCodeFlood || strings.Contains(strings.ToLower(msg), "flood") {
+		return &FloodError{Code: code, Msg: msg}
+	}
+	return &vkError{Code: code, Msg: msg}
+}
+
 // postForm POSTs application/x-www-form-urlencoded and returns the body.
 func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -140,23 +185,65 @@ func (c *Client) GetCallToken(ctx context.Context, accessToken, joinLink, name s
 			Code           int    `json:"error_code"`
 			Msg            string `json:"error_msg"`
 			CaptchaEnabled bool   `json:"is_enabled_captcha"`
+			RedirectURI    string `json:"redirect_uri"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		return "", fmt.Errorf("vkapi: decode getAnonymousToken: %w", err)
 	}
 	if env.Error != nil {
-		// VK can gate the anonymous token behind a captcha (anti-abuse); a headless
-		// client cannot and must not solve it. Surface it as its own error.
-		if env.Error.CaptchaEnabled || env.Error.Code == 14 {
-			return "", fmt.Errorf("vkapi: getAnonymousToken requires a captcha (error %d: %s); the headless flow is blocked here", env.Error.Code, env.Error.Msg)
-		}
-		return "", &vkError{Code: env.Error.Code, Msg: env.Error.Msg}
+		return "", classifyError(env.Error.Code, env.Error.Msg, env.Error.RedirectURI, env.Error.CaptchaEnabled)
 	}
 	if env.Response.Token == "" {
 		return "", fmt.Errorf("vkapi: getAnonymousToken returned no token")
 	}
 	return env.Response.Token, nil
+}
+
+// RetryPolicy controls the polite backoff for transient flood-control errors.
+// A MaxAttempts <= 1 means a single attempt (no retry).
+type RetryPolicy struct {
+	MaxAttempts int           // total attempts including the first
+	BaseDelay   time.Duration // first backoff, doubled each attempt
+	MaxDelay    time.Duration // cap on one backoff (0 = uncapped)
+}
+
+// DefaultRetryPolicy is a conservative, low-footprint policy for flood control.
+var DefaultRetryPolicy = RetryPolicy{MaxAttempts: 4, BaseDelay: 2 * time.Second, MaxDelay: 30 * time.Second}
+
+// GetCallTokenRetry is GetCallToken with a polite backoff that retries ONLY on
+// flood control (a transient rate limit). A captcha or any other error returns
+// immediately: a captcha must be solved by a human and must never be retried away.
+func (c *Client) GetCallTokenRetry(ctx context.Context, accessToken, joinLink, name string, p RetryPolicy) (string, error) {
+	attempts := p.MaxAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := p.BaseDelay
+	for i := 0; i < attempts; i++ {
+		tok, err := c.GetCallToken(ctx, accessToken, joinLink, name)
+		if err == nil {
+			return tok, nil
+		}
+		var fe *FloodError
+		if !errors.As(err, &fe) || i == attempts-1 {
+			return "", err // not flood, or no attempts left
+		}
+		d := delay
+		if p.MaxDelay > 0 && d > p.MaxDelay {
+			d = p.MaxDelay
+		}
+		if d > 0 {
+			d += time.Duration(rand.Int63n(int64(d)/2 + 1)) // up to +50% jitter
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(d):
+		}
+		delay *= 2
+	}
+	return "", errors.New("vkapi: GetCallTokenRetry exhausted attempts")
 }
 
 // GetAnonymToken obtains an anonymous VK access token via the login service's

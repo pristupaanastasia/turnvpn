@@ -164,7 +164,9 @@ func resolveCallToken(ctx context.Context, cfg config) (string, error) {
 		access = a
 		log.Printf("obtained anonymous access token (experimental get_anonym_token)")
 	}
-	tok, err := vk.GetCallToken(ctx, access, cfg.link, cfg.name)
+	// Retry politely on transient flood control; a captcha returns immediately
+	// (it must be solved by a human in a browser, never retried away).
+	tok, err := vk.GetCallTokenRetry(ctx, access, cfg.link, cfg.name, vkapi.DefaultRetryPolicy)
 	if err != nil {
 		return "", fmt.Errorf("get call token: %w", err)
 	}

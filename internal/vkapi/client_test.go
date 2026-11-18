@@ -2,11 +2,14 @@ package vkapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestGetCallToken(t *testing.T) {
@@ -58,11 +61,65 @@ func TestGetCallTokenCaptcha(t *testing.T) {
 	defer srv.Close()
 	c := &Client{APIBase: srv.URL}
 	_, err := c.GetCallToken(context.Background(), "A", "L", "n")
-	if err == nil {
-		t.Fatal("expected captcha error")
+	var ce *CaptchaError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *CaptchaError, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "captcha") {
-		t.Errorf("error = %q, want it to mention captcha", err)
+	if ce.Code != 14 {
+		t.Errorf("captcha code = %d, want 14", ce.Code)
+	}
+}
+
+func TestGetCallTokenFlood(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"error":{"error_code":9,"error_msg":"Flood control"}}`))
+	}))
+	defer srv.Close()
+	c := &Client{APIBase: srv.URL}
+	_, err := c.GetCallToken(context.Background(), "A", "L", "n")
+	var fe *FloodError
+	if !errors.As(err, &fe) {
+		t.Fatalf("expected *FloodError, got %v", err)
+	}
+}
+
+func TestGetCallTokenRetryOnFlood(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 { // flood the first two attempts, then succeed
+			w.Write([]byte(`{"error":{"error_code":9,"error_msg":"Flood control"}}`))
+			return
+		}
+		w.Write([]byte(`{"response":{"token":"CALLTOK"}}`))
+	}))
+	defer srv.Close()
+	c := &Client{APIBase: srv.URL}
+	tok, err := c.GetCallTokenRetry(context.Background(), "A", "L", "n",
+		RetryPolicy{MaxAttempts: 4, BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("retry should succeed after flood: %v", err)
+	}
+	if tok != "CALLTOK" || calls.Load() != 3 {
+		t.Errorf("tok=%q calls=%d, want CALLTOK after 3 calls", tok, calls.Load())
+	}
+}
+
+func TestGetCallTokenRetryNotOnCaptcha(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(`{"error":{"error_code":14,"error_msg":"Captcha need","is_enabled_captcha":true}}`))
+	}))
+	defer srv.Close()
+	c := &Client{APIBase: srv.URL}
+	_, err := c.GetCallTokenRetry(context.Background(), "A", "L", "n",
+		RetryPolicy{MaxAttempts: 5, BaseDelay: time.Millisecond})
+	var ce *CaptchaError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *CaptchaError, got %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("captcha must not be retried: calls=%d, want 1", calls.Load())
 	}
 }
 
