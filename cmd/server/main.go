@@ -29,7 +29,13 @@ func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "UDP address to listen on for DTLS")
 	secret := flag.String("secret", "", "single shared secret for mutual DTLS auth (or env TURNVPN_SECRET)")
 	keyringPath := flag.String("keyring", "", "path to a per-client keyring file ('identity secret' per line; or env TURNVPN_KEYRING) — enables per-client auth with revocation")
+	shape := flag.String("shape", "", "footprint-shape the download bitrate cap, e.g. 2mbit (empty = unlimited)")
 	flag.Parse()
+
+	shapeBytes, err := mux.ParseBitrate(*shape)
+	if err != nil {
+		log.Fatalf("server: %v", err)
+	}
 
 	if *secret == "" {
 		*secret = os.Getenv("TURNVPN_SECRET")
@@ -81,13 +87,13 @@ func main() {
 			log.Printf("server: accept: %v", err)
 			continue
 		}
-		go serve(conn)
+		go serve(conn, shapeBytes)
 	}
 }
 
 // serve completes the DTLS handshake, runs a smux session over it, and handles each
 // stream as a new outbound TCP connection.
-func serve(conn net.Conn) {
+func serve(conn net.Conn, shapeBytes int) {
 	defer func() { _ = conn.Close() }()
 	ra := conn.RemoteAddr()
 
@@ -102,7 +108,7 @@ func serve(conn net.Conn) {
 	}
 	log.Printf("server: tunnel up from %s", ra)
 
-	sess, lane, err := mux.Server(conn)
+	sess, lane, err := mux.Server(conn, mux.WithRate(shapeBytes))
 	if err != nil {
 		log.Printf("server: %s mux: %v", ra, err)
 		return

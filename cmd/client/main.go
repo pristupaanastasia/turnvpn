@@ -44,6 +44,7 @@ import (
 
 type config struct {
 	listen, peer, vkLink, token, appKey, secret, identity string
+	shape                                                 int // outbound bitrate cap (bytes/sec); 0 = unlimited
 }
 
 // CredsFunc resolves the call's TURN credentials for a (re)connect: given the join
@@ -73,6 +74,7 @@ func main() {
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
 	secret := flag.String("secret", "", "shared secret for mutual DTLS auth, must match the server (or env TURNVPN_SECRET); REQUIRED")
 	identity := flag.String("identity", "", "client PSK identity for a server keyring (optional; empty = single-secret mode)")
+	shapeStr := flag.String("shape", "", "footprint-shape outbound bitrate cap, e.g. 2mbit (empty = unlimited)")
 	tunnels := flag.Int("tunnels", 2, "number of parallel tunnels (streams are round-robined across them for throughput)")
 	refresh := flag.Duration("refresh", tunnelTTL, "proactively refresh each tunnel's session after this interval (before its ~10m creds expire)")
 	flag.Parse()
@@ -93,7 +95,11 @@ func main() {
 	if *secret == "" {
 		log.Fatal("client: -secret (or env TURNVPN_SECRET) is required and must match the server")
 	}
-	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey, secret: *secret, identity: *identity}
+	shapeBytes, err := mux.ParseBitrate(*shapeStr)
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
+	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey, secret: *secret, identity: *identity, shape: shapeBytes}
 
 	var peerAddrs []*net.UDPAddr
 	for _, p := range strings.Split(cfg.peer, ",") {
@@ -495,7 +501,7 @@ func (t *tunnel) establish() (*smux.Session, *mux.Lane, []io.Closer, error) {
 	}
 	closers = append(closers, dconn)
 
-	sess, lane, err := mux.Client(dconn)
+	sess, lane, err := mux.Client(dconn, mux.WithRate(cfg.shape))
 	if err != nil {
 		return fail(err)
 	}

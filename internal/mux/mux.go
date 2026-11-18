@@ -46,12 +46,13 @@ func noneCrypt() (kcp.BlockCrypt, error) { return kcp.NewNoneBlockCrypt(nil) }
 
 // Client turns a connected DTLS conn into a smux client session plus the Lane's
 // unreliable datagram channel (both multiplexed over the one DTLS conn).
-func Client(dtlsConn net.Conn) (*smux.Session, *Lane, error) {
+func Client(dtlsConn net.Conn, opts ...Option) (*smux.Session, *Lane, error) {
 	block, err := noneCrypt()
 	if err != nil {
 		return nil, nil, err
 	}
 	lane := NewLane(dtlsConn)
+	applyLaneOpts(lane, opts)
 	kc, err := kcp.NewConn2(dtlsConn.RemoteAddr(), block, 0, 0, lane.PacketConn())
 	if err != nil {
 		_ = lane.Close()
@@ -69,12 +70,13 @@ func Client(dtlsConn net.Conn) (*smux.Session, *Lane, error) {
 
 // Server turns an accepted DTLS conn into a smux server session plus the Lane's
 // unreliable datagram channel.
-func Server(dtlsConn net.Conn) (*smux.Session, *Lane, error) {
+func Server(dtlsConn net.Conn, opts ...Option) (*smux.Session, *Lane, error) {
 	block, err := noneCrypt()
 	if err != nil {
 		return nil, nil, err
 	}
 	lane := NewLane(dtlsConn)
+	applyLaneOpts(lane, opts)
 	ln, err := kcp.ServeConn(block, 0, 0, lane.PacketConn())
 	if err != nil {
 		_ = lane.Close()

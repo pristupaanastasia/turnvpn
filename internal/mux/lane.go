@@ -26,7 +26,8 @@ const (
 // Lane demultiplexes a message-preserving net.Conn (a dtls.Conn) into the reliable
 // lane (exposed as a net.PacketConn for KCP) and the unreliable datagram lane.
 type Lane struct {
-	conn net.Conn
+	conn   net.Conn
+	shaper *shaper // nil = no footprint shaping; else paces outbound emission
 
 	wmu sync.Mutex // serializes writes to conn (KCP + datagrams share it)
 
@@ -119,6 +120,11 @@ func (l *Lane) writeTagged(tag byte, flow uint32, b []byte) (int, error) {
 		out = append(out, tag)
 	}
 	out = append(out, b...)
+	// Pace emission to the shaped rate (outside the write lock, so sleeping here does
+	// not block the conn for other writers' token math).
+	if l.shaper != nil {
+		l.shaper.take(len(out))
+	}
 	l.wmu.Lock()
 	defer l.wmu.Unlock()
 	if _, err := l.conn.Write(out); err != nil {
