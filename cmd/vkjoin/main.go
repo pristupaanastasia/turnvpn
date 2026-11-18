@@ -23,6 +23,7 @@ import (
 
 	"github.com/pristupaanastasia/turnvpn/internal/graceful"
 	"github.com/pristupaanastasia/turnvpn/internal/okapi"
+	"github.com/pristupaanastasia/turnvpn/internal/vkapi"
 	"github.com/pristupaanastasia/turnvpn/internal/wttransport"
 )
 
@@ -31,7 +32,10 @@ const httpTimeout = 30 * time.Second
 
 func main() {
 	link := flag.String("link", "", "join link token from vk.ru/call/join/<token> (required)")
-	token := flag.String("token", "", "VK guest call token (auth_token/anonymToken); required")
+	token := flag.String("token", "", "VK guest call token (auth_token/anonymToken); if empty, derive it")
+	accessToken := flag.String("access-token", "", "VK anonymous access token; with -link derives the call token (or env VKJOIN_ACCESS_TOKEN)")
+	autoToken := flag.Bool("auto-token", false, "obtain the anonymous access token automatically (experimental get_anonym_token)")
+	name := flag.String("name", "probe", "guest display name")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
 	deviceID := flag.String("device-id", "turnvpn-vkjoin", "stable device id for anonymLogin")
 	clientVer := flag.String("client-version", "0.0.0", "client_version for anonymLogin")
@@ -44,9 +48,13 @@ func main() {
 	if tok == "" {
 		tok = os.Getenv("VKJOIN_TOKEN") // keep the token out of the process list
 	}
-	if *link == "" || tok == "" {
-		fmt.Fprintln(os.Stderr, "usage: vkjoin -link <token> -token <guest-call-token> [flags]")
-		fmt.Fprintln(os.Stderr, "       (the call token may also come from the VKJOIN_TOKEN env var)")
+	accTok := *accessToken
+	if accTok == "" {
+		accTok = os.Getenv("VKJOIN_ACCESS_TOKEN")
+	}
+	if *link == "" || (tok == "" && accTok == "" && !*autoToken) {
+		fmt.Fprintln(os.Stderr, "usage: vkjoin -link <token> [-token <call-token> | -access-token <vk-token> | -auto-token] [flags]")
+		fmt.Fprintln(os.Stderr, "       tokens may also come from VKJOIN_TOKEN / VKJOIN_ACCESS_TOKEN env vars")
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -55,7 +63,8 @@ func main() {
 	defer r.Stop()
 
 	if err := run(r.Context(), config{
-		link: *link, token: tok, appKey: *appKey, deviceID: *deviceID,
+		link: *link, token: tok, accessToken: accTok, autoToken: *autoToken, name: *name,
+		appKey: *appKey, deviceID: *deviceID,
 		clientVersion: *clientVer, entityType: *entityType, video: *video, duration: *dur,
 	}); err != nil {
 		log.Fatalf("vkjoin: %v", err)
@@ -63,15 +72,21 @@ func main() {
 }
 
 type config struct {
-	link, token, appKey, deviceID, clientVersion, entityType string
-	video                                                    bool
-	duration                                                 time.Duration
+	link, token, accessToken, name              string
+	appKey, deviceID, clientVersion, entityType string
+	autoToken, video                            bool
+	duration                                    time.Duration
 }
 
 func run(ctx context.Context, cfg config) error {
+	callToken, err := resolveCallToken(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
 	cl := &okapi.Client{AppKey: cfg.appKey, HTTP: &http.Client{Timeout: httpTimeout}}
 
-	login, err := cl.AnonymLogin(ctx, cfg.token, cfg.deviceID, cfg.clientVersion)
+	login, err := cl.AnonymLogin(ctx, callToken, cfg.deviceID, cfg.clientVersion)
 	if err != nil {
 		return fmt.Errorf("anonymLogin: %w", err)
 	}
@@ -79,7 +94,7 @@ func run(ctx context.Context, cfg config) error {
 
 	desc, err := cl.JoinConversationByLink(ctx, cfg.link, okapi.JoinOptions{
 		IsVideo:     cfg.video,
-		AnonymToken: cfg.token,
+		AnonymToken: callToken,
 	})
 	if err != nil {
 		return fmt.Errorf("joinConversationByLink: %w", err)
@@ -127,6 +142,34 @@ func run(ctx context.Context, cfg config) error {
 			logMessage(msg)
 		}
 	}
+}
+
+// resolveCallToken returns the per-call guest token: the explicit -token if set,
+// otherwise derived from a VK anonymous access token (explicit, env, or, with
+// -auto-token, fetched via the experimental get_anonym_token).
+func resolveCallToken(ctx context.Context, cfg config) (string, error) {
+	if cfg.token != "" {
+		return cfg.token, nil
+	}
+	vk := &vkapi.Client{HTTP: &http.Client{Timeout: httpTimeout}}
+	access := cfg.accessToken
+	if access == "" {
+		if !cfg.autoToken {
+			return "", fmt.Errorf("no call token: pass -token, -access-token, or -auto-token")
+		}
+		a, err := vk.GetAnonymToken(ctx)
+		if err != nil {
+			return "", fmt.Errorf("get anonymous access token: %w", err)
+		}
+		access = a
+		log.Printf("obtained anonymous access token (experimental get_anonym_token)")
+	}
+	tok, err := vk.GetCallToken(ctx, access, cfg.link, cfg.name)
+	if err != nil {
+		return "", fmt.Errorf("get call token: %w", err)
+	}
+	log.Printf("derived call token from access token")
+	return tok, nil
 }
 
 // buildParams maps the login + descriptor onto the signaling URL parameters, and

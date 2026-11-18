@@ -13,6 +13,26 @@ OK `id` — все заредакчены. Здесь — структура п�
 `subscribeToQueue` вообще возвращает error, а звонок работает). fb.do — это OK
 API: часть вызовов = джойн/логин, часть = телеметрия.
 
+## VK-бутстрап: как получить `callToken` (из `webCallsBridge.js`)
+
+Перед OK-частью клиент добывает гостевой `callToken` через VK. Реализовано в
+`internal/vkapi`. Два шага:
+
+1. **`get_anonym_token`** (login.vk.ru) → анонимный VK access-token (JWT с
+   `anonym_id_long`). Параметры (из чанка): `client_id=6287487` (VK web app,
+   он же `client_id` в `subscribeToQueue`), `client_secret=QbYic1K3lEV5kTGiqlq2`
+   (публичный), `token_type=messages`, `version=5.226`, домен `login.vk.ru`.
+   **Точная HTTP-форма (`act`/endpoint/кодирование) — в VK login-модуле, которого
+   нет; помечено EXPERIMENTAL.** Уточнить захватом реального `get_anonym_token`
+   (свежий гость с очищенными cookie) или скачав login-чанк.
+2. **`calls.getAnonymousToken`** (`web.api.vk.ru/method/`, стандартный VK API:
+   `access_token`+`v=5.226`) с параметрами `vk_join_link=<токен ссылки>`,
+   `name=<имя гостя>` → `response.token` = **`callToken`**. Эта часть грунтована
+   (параметры из чанка + публичный VK API) и покрыта тестами.
+
+`callToken` далее идёт в OK: `auth.anonymLogin` (`auth_token`) и
+`vchat.joinConversationByLink` (`anonymToken`). Токены короткоживущие.
+
 ## Поток джойна (OK API над `fb.do`, POST form-encoded)
 
 Все запросы — `POST https://calls.okcdn.ru/fb.do`, тело form-encoded с общими
