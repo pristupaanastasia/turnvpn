@@ -135,8 +135,12 @@ func run(ctx context.Context, cfg config) error {
 		if res != nil && res.ConnectionInfo != nil {
 			log.Printf("call %s: connected=%v", res.ConnectionInfo.Conversation.ID, res.Connected)
 		}
-		// Reaching the duration (ctx deadline/cancel) is a normal end, not a failure.
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		// A clean end is: we connected, then held the call to the -duration deadline
+		// (or a Ctrl+C). Timing out *before* connect, or any other error, is a failure.
+		if res != nil && res.Connected && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+			return nil
+		}
+		if err != nil {
 			return fmt.Errorf("join call: %w", err)
 		}
 		return nil
