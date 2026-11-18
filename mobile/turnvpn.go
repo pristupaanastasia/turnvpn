@@ -62,11 +62,11 @@ func (tunProxy) DialUDP(m *M.Metadata) (net.PacketConn, error) {
 	if m.DstPort == 53 {
 		return newDNSPacketConn(d, m), nil
 	}
-	stream, err := d.DialUDPStream(m.DestinationAddress())
+	flow, err := d.OpenUDP(m.DestinationAddress())
 	if err != nil {
 		return nil, err
 	}
-	return newUDPConn(stream, m.UDPAddr()), nil
+	return newUDPConn(flow, m.UDPAddr()), nil
 }
 
 // Start brings up the VPN: it builds the tunnel (credentials from the VK call token)

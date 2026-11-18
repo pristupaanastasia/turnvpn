@@ -80,13 +80,13 @@ func serve(conn net.Conn) {
 	}
 	log.Printf("server: tunnel up from %s", ra)
 
-	sess, err := mux.Server(conn)
+	sess, lane, err := mux.Server(conn)
 	if err != nil {
 		log.Printf("server: %s mux: %v", ra, err)
 		return
 	}
 	defer func() { _ = sess.Close() }()
 
-	tunnel.Serve(sess, log.Printf)
+	tunnel.Serve(sess, lane, log.Printf)
 	log.Printf("server: tunnel down from %s", ra)
 }

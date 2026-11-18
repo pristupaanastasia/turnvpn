@@ -1,72 +1,71 @@
 package turnvpn
 
 import (
-	"encoding/binary"
-	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/pristupaanastasia/turnvpn/internal/vpntun"
 )
 
-// udpConn bridges one tun2socks UDP flow onto a tunnel stream: each datagram is
-// framed with a uint16 length prefix, and the server relays it to the real UDP
-// target. tun2socks drives it as a net.PacketConn.
+// udpConn presents one vpntun UDP flow (datagrams over the tunnel's unreliable Lane)
+// as a net.PacketConn for tun2socks. Unlike the old stream-based path, datagrams are
+// not forced through a reliable ordered stream, so a lost packet does not head-of-line
+// block the flow (QUIC keeps its semantics).
 type udpConn struct {
-	stream net.Conn
+	flow   *vpntun.UDPFlow
 	server net.Addr
-	wmu    sync.Mutex
+
+	mu     sync.Mutex
+	rdl    time.Time
+	once   sync.Once
+	closed chan struct{}
 }
 
-func newUDPConn(stream net.Conn, server net.Addr) *udpConn {
-	return &udpConn{stream: stream, server: server}
+func newUDPConn(flow *vpntun.UDPFlow, server net.Addr) *udpConn {
+	return &udpConn{flow: flow, server: server, closed: make(chan struct{})}
 }
 
-// WriteTo frames p (a single datagram) and sends it down the stream. The addr is
-// ignored: the stream is already bound to the flow's destination.
 func (c *udpConn) WriteTo(p []byte, _ net.Addr) (int, error) {
-	n := len(p)
-	if n > 65535 {
-		n = 65535
-	}
-	out := make([]byte, 2+n)
-	binary.BigEndian.PutUint16(out[:2], uint16(n))
-	copy(out[2:], p[:n])
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	if _, err := c.stream.Write(out); err != nil {
-		return 0, err
-	}
-	return len(p), nil
+	return c.flow.Send(p)
 }
 
-// ReadFrom returns the next datagram relayed back from the target.
 func (c *udpConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	var lb [2]byte
-	if _, err := io.ReadFull(c.stream, lb[:]); err != nil {
-		return 0, nil, err
+	c.mu.Lock()
+	dl := c.rdl
+	c.mu.Unlock()
+
+	var timeout <-chan time.Time
+	if !dl.IsZero() {
+		t := time.NewTimer(time.Until(dl))
+		defer t.Stop()
+		timeout = t.C
 	}
-	n := int(binary.BigEndian.Uint16(lb[:]))
-	if n == 0 {
-		return 0, c.server, nil
+	select {
+	case b := <-c.flow.Inbound():
+		return copy(p, b), c.server, nil
+	case <-timeout:
+		return 0, nil, os.ErrDeadlineExceeded
+	case <-c.closed:
+		return 0, nil, net.ErrClosed
 	}
-	if len(p) >= n {
-		if _, err := io.ReadFull(c.stream, p[:n]); err != nil {
-			return 0, nil, err
-		}
-		return n, c.server, nil
-	}
-	// Caller buffer too small: drain the datagram, then truncate.
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(c.stream, buf); err != nil {
-		return 0, nil, err
-	}
-	return copy(p, buf), c.server, nil
 }
 
-func (c *udpConn) Close() error                      { return c.stream.Close() }
-func (c *udpConn) LocalAddr() net.Addr               { return &net.UDPAddr{IP: net.IPv4zero} }
-func (c *udpConn) SetDeadline(t time.Time) error     { return c.stream.SetDeadline(t) }
-func (c *udpConn) SetReadDeadline(t time.Time) error { return c.stream.SetReadDeadline(t) }
-func (c *udpConn) SetWriteDeadline(t time.Time) error {
-	return c.stream.SetWriteDeadline(t)
+func (c *udpConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.flow.Close()
 }
+
+func (c *udpConn) LocalAddr() net.Addr { return &net.UDPAddr{IP: net.IPv4zero} }
+
+func (c *udpConn) SetDeadline(t time.Time) error { return c.SetReadDeadline(t) }
+
+func (c *udpConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.rdl = t
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *udpConn) SetWriteDeadline(_ time.Time) error { return nil }

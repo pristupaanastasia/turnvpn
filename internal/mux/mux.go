@@ -19,25 +19,13 @@ import (
 	"github.com/xtaci/smux"
 )
 
-// packetConn adapts a message-preserving net.Conn (a dtls.Conn) to net.PacketConn,
-// which is what kcp-go consumes. Each DTLS Read/Write already carries exactly one
-// datagram, so ReadFrom/WriteTo map directly onto Read/Write.
-type packetConn struct{ net.Conn }
-
-func (p packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, err := p.Read(b)
-	return n, p.RemoteAddr(), err
-}
-
-func (p packetConn) WriteTo(b []byte, _ net.Addr) (int, error) { return p.Write(b) }
-
 // tuneKCP sizes the KCP session for a TURN-relayed tunnel: low-latency NoDelay, a
 // window that sustains a few Mbit/s, and a conservative MTU that fits a DTLS record
-// inside a TURN ChannelData datagram.
+// (plus the Lane's 1-byte tag) inside a TURN ChannelData datagram.
 func tuneKCP(s *kcp.UDPSession) {
 	s.SetNoDelay(1, 20, 2, 1) // nodelay on, 20ms interval, fast resend, no congestion window
 	s.SetWindowSize(256, 256)
-	s.SetMtu(1200)
+	s.SetMtu(1197) // leave room for the Lane tag byte
 	s.SetACKNoDelay(true)
 }
 
@@ -56,49 +44,58 @@ func smuxConfig() *smux.Config {
 // encrypts every datagram, so KCP must not encrypt again.
 func noneCrypt() (kcp.BlockCrypt, error) { return kcp.NewNoneBlockCrypt(nil) }
 
-// Client turns a connected DTLS conn into a smux client session (KCP underneath).
-func Client(dtlsConn net.Conn) (*smux.Session, error) {
+// Client turns a connected DTLS conn into a smux client session plus the Lane's
+// unreliable datagram channel (both multiplexed over the one DTLS conn).
+func Client(dtlsConn net.Conn) (*smux.Session, *Lane, error) {
 	block, err := noneCrypt()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	kc, err := kcp.NewConn2(dtlsConn.RemoteAddr(), block, 0, 0, packetConn{dtlsConn})
+	lane := NewLane(dtlsConn)
+	kc, err := kcp.NewConn2(dtlsConn.RemoteAddr(), block, 0, 0, lane.PacketConn())
 	if err != nil {
-		return nil, fmt.Errorf("mux: kcp dial: %w", err)
+		_ = lane.Close()
+		return nil, nil, fmt.Errorf("mux: kcp dial: %w", err)
 	}
 	tuneKCP(kc)
 	sess, err := smux.Client(kc, smuxConfig())
 	if err != nil {
 		_ = kc.Close()
-		return nil, fmt.Errorf("mux: smux client: %w", err)
+		_ = lane.Close()
+		return nil, nil, fmt.Errorf("mux: smux client: %w", err)
 	}
-	return sess, nil
+	return sess, lane, nil
 }
 
-// Server turns an accepted DTLS conn into a smux server session (KCP underneath).
-func Server(dtlsConn net.Conn) (*smux.Session, error) {
+// Server turns an accepted DTLS conn into a smux server session plus the Lane's
+// unreliable datagram channel.
+func Server(dtlsConn net.Conn) (*smux.Session, *Lane, error) {
 	block, err := noneCrypt()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	ln, err := kcp.ServeConn(block, 0, 0, packetConn{dtlsConn})
+	lane := NewLane(dtlsConn)
+	ln, err := kcp.ServeConn(block, 0, 0, lane.PacketConn())
 	if err != nil {
-		return nil, fmt.Errorf("mux: kcp serve: %w", err)
+		_ = lane.Close()
+		return nil, nil, fmt.Errorf("mux: kcp serve: %w", err)
 	}
 	// One DTLS conn carries exactly one KCP session; accept it (bounded wait).
 	if err := ln.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	kc, err := ln.AcceptKCP()
 	if err != nil {
-		return nil, fmt.Errorf("mux: kcp accept: %w", err)
+		_ = lane.Close()
+		return nil, nil, fmt.Errorf("mux: kcp accept: %w", err)
 	}
 	_ = kc.SetDeadline(time.Time{})
 	tuneKCP(kc)
 	sess, err := smux.Server(kc, smuxConfig())
 	if err != nil {
 		_ = kc.Close()
-		return nil, fmt.Errorf("mux: smux server: %w", err)
+		_ = lane.Close()
+		return nil, nil, fmt.Errorf("mux: smux server: %w", err)
 	}
-	return sess, nil
+	return sess, lane, nil
 }

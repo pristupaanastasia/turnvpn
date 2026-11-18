@@ -384,7 +384,7 @@ func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
 	}
 	closers = append(closers, dconn)
 
-	sess, err := mux.Client(dconn)
+	sess, _, err := mux.Client(dconn)
 	if err != nil {
 		return fail(err)
 	}

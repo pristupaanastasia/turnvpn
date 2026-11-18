@@ -15,6 +15,7 @@ import (
 
 	"github.com/xtaci/smux"
 
+	"github.com/pristupaanastasia/turnvpn/internal/mux"
 	"github.com/pristupaanastasia/turnvpn/internal/socks"
 )
 
@@ -33,11 +34,18 @@ const udpScheme = "udp/"
 // maxDatagram bounds one UDP payload (the uint16 length prefix framing datagrams).
 const maxDatagram = 65535
 
-// Serve accepts streams on sess until it closes; each stream's target is read and
-// piped to a freshly dialed TCP connection. logf may be nil.
-func Serve(sess *smux.Session, logf func(string, ...any)) {
+// Serve accepts streams on sess until it closes. A TCP stream is piped to a dialed
+// peer; a "udp/" control stream registers a flow whose datagrams ride lane (the
+// unreliable channel) instead of the ordered stream — so UDP/QUIC is not head-of-line
+// blocked by the reliable path. lane may be nil (UDP then refused). logf may be nil.
+func Serve(sess *smux.Session, lane *mux.Lane, logf func(string, ...any)) {
 	if logf == nil {
 		logf = func(string, ...any) {}
+	}
+	reg := newUDPRegistry()
+	defer reg.closeAll()
+	if lane != nil {
+		lane.SetDatagramHandler(func(flow uint32, payload []byte) { reg.send(flow, payload) })
 	}
 	var wg sync.WaitGroup
 	for {
@@ -48,14 +56,15 @@ func Serve(sess *smux.Session, logf func(string, ...any)) {
 		wg.Add(1)
 		go func(s *smux.Stream) {
 			defer wg.Done()
-			handle(s, logf)
+			handle(s, lane, reg, logf)
 		}(stream)
 	}
 	wg.Wait()
 }
 
-// handle reads one stream's target header and pipes it to a dialed TCP peer.
-func handle(s *smux.Stream, logf func(string, ...any)) {
+// handle reads one stream's target header and either pipes it to a dialed TCP peer
+// or (for a "udp/" stream) sets up a UDP flow.
+func handle(s *smux.Stream, lane *mux.Lane, reg *udpRegistry, logf func(string, ...any)) {
 	defer func() { _ = s.Close() }()
 
 	target, err := socks.ReadTarget(s)
@@ -64,65 +73,115 @@ func handle(s *smux.Stream, logf func(string, ...any)) {
 		return
 	}
 	if strings.HasPrefix(target, udpScheme) {
-		handleUDP(s, strings.TrimPrefix(target, udpScheme), logf)
+		handleUDP(s, strings.TrimPrefix(target, udpScheme), lane, reg, logf)
 		return
 	}
-	remote, err := net.DialTimeout("tcp", target, DialTimeout)
+	addr, err := resolveSafe(target)
 	if err != nil {
-		logf("tunnel: dial %s: %v", target, err)
+		logf("tunnel: %v", err)
+		return
+	}
+	remote, err := net.DialTimeout("tcp", addr, DialTimeout)
+	if err != nil {
+		logf("tunnel: dial %s: %v", addr, err)
 		return
 	}
 	defer func() { _ = remote.Close() }()
 	Pipe(s, remote)
 }
 
-// handleUDP relays a UDP association: it dials dst over UDP and pipes length-prefixed
-// datagrams between the stream and the socket until either side ends or dst goes idle.
-func handleUDP(s *smux.Stream, dst string, logf func(string, ...any)) {
-	uc, err := net.DialTimeout("udp", dst, DialTimeout)
-	if err != nil {
-		logf("tunnel: udp dial %s: %v", dst, err)
+// handleUDP sets up a UDP flow: it reads the client's 4-byte flow id from the
+// control stream, dials dst over UDP, and relays datagrams over lane (socket -> lane
+// here; lane -> socket via the registry handler). The control stream stays open for
+// the flow's lifetime; its EOF — or dst going idle — tears the flow down.
+func handleUDP(s *smux.Stream, dst string, lane *mux.Lane, reg *udpRegistry, logf func(string, ...any)) {
+	if lane == nil {
+		logf("tunnel: udp flow but no datagram lane")
 		return
 	}
-	defer func() { _ = uc.Close() }()
+	var fb [4]byte
+	if _, err := io.ReadFull(s, fb[:]); err != nil {
+		logf("tunnel: udp flow id: %v", err)
+		return
+	}
+	flow := binary.BigEndian.Uint32(fb[:])
 
-	// stream -> socket: each datagram is a uint16 length then that many bytes.
+	addr, err := resolveSafe(dst)
+	if err != nil {
+		logf("tunnel: udp %v", err)
+		return
+	}
+	uc, err := net.DialTimeout("udp", addr, DialTimeout)
+	if err != nil {
+		logf("tunnel: udp dial %s: %v", addr, err)
+		return
+	}
+	reg.add(flow, uc)
+	defer reg.remove(flow) // closes uc
+
+	// socket -> lane: tag each inbound datagram with its flow id.
 	go func() {
-		defer func() { _ = uc.Close(); _ = s.Close() }()
-		var lb [2]byte
+		buf := make([]byte, maxDatagram)
 		for {
-			if _, err := io.ReadFull(s, lb[:]); err != nil {
+			_ = uc.SetReadDeadline(time.Now().Add(udpIdle))
+			n, err := uc.Read(buf)
+			if err != nil {
+				_ = s.Close() // wake the control-stream reader -> teardown
 				return
 			}
-			n := int(binary.BigEndian.Uint16(lb[:]))
-			if n == 0 {
-				continue
-			}
-			buf := make([]byte, n)
-			if _, err := io.ReadFull(s, buf); err != nil {
-				return
-			}
-			if _, err := uc.Write(buf); err != nil {
+			if _, err := lane.SendDatagram(flow, buf[:n]); err != nil {
 				return
 			}
 		}
 	}()
 
-	// socket -> stream: frame each datagram with a uint16 length; idle tears it down.
-	buf := make([]byte, maxDatagram)
-	for {
-		_ = uc.SetReadDeadline(time.Now().Add(udpIdle))
-		n, err := uc.Read(buf)
-		if err != nil {
-			return
-		}
-		out := make([]byte, 2+n)
-		binary.BigEndian.PutUint16(out[:2], uint16(n))
-		copy(out[2:], buf[:n])
-		if _, err := s.Write(out); err != nil {
-			return
-		}
+	// Block until the client closes the control stream (flow teardown).
+	_, _ = io.Copy(io.Discard, s)
+}
+
+// udpRegistry maps a flow id to its UDP socket for one served session.
+type udpRegistry struct {
+	mu sync.Mutex
+	m  map[uint32]net.Conn
+}
+
+func newUDPRegistry() *udpRegistry { return &udpRegistry{m: make(map[uint32]net.Conn)} }
+
+func (r *udpRegistry) add(flow uint32, c net.Conn) {
+	r.mu.Lock()
+	if old := r.m[flow]; old != nil {
+		_ = old.Close()
 	}
+	r.m[flow] = c
+	r.mu.Unlock()
+}
+
+func (r *udpRegistry) remove(flow uint32) {
+	r.mu.Lock()
+	c := r.m[flow]
+	delete(r.m, flow)
+	r.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
+}
+
+func (r *udpRegistry) send(flow uint32, b []byte) {
+	r.mu.Lock()
+	c := r.m[flow]
+	r.mu.Unlock()
+	if c != nil {
+		_, _ = c.Write(b)
+	}
+}
+
+func (r *udpRegistry) closeAll() {
+	r.mu.Lock()
+	for _, c := range r.m {
+		_ = c.Close()
+	}
+	r.m = make(map[uint32]net.Conn)
+	r.mu.Unlock()
 }
 
 // Open opens a new stream on sess for target and writes the target header; the
@@ -139,15 +198,22 @@ func Open(sess *smux.Session, target string) (*smux.Stream, error) {
 	return stream, nil
 }
 
-// OpenUDP opens a stream that relays UDP datagrams to target: the server dials UDP
-// and pipes datagrams both ways. The caller frames each datagram with a uint16
-// length prefix (see the mobile udpConn). TCP streams stay unprefixed.
-func OpenUDP(sess *smux.Session, target string) (*smux.Stream, error) {
+// OpenUDP opens a UDP control stream for a flow: it writes the "udp/"+target header
+// and the 4-byte flow id. Datagrams themselves ride the Lane (keyed by flow id), not
+// this stream; the stream stays open as the flow's lifetime (closing it tears the
+// flow down server-side).
+func OpenUDP(sess *smux.Session, target string, flow uint32) (*smux.Stream, error) {
 	stream, err := sess.OpenStream()
 	if err != nil {
 		return nil, err
 	}
 	if err := socks.WriteTarget(stream, udpScheme+target); err != nil {
+		_ = stream.Close()
+		return nil, err
+	}
+	var fb [4]byte
+	binary.BigEndian.PutUint32(fb[:], flow)
+	if _, err := stream.Write(fb[:]); err != nil {
 		_ = stream.Close()
 		return nil, err
 	}

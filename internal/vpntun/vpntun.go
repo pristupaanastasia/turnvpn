@@ -49,8 +49,14 @@ type Dialer struct {
 
 	mu      sync.Mutex
 	sess    *smux.Session
+	lane    *mux.Lane
 	closers []io.Closer
 	closed  bool
+
+	// UDP flows for the current session: id -> inbound datagram queue.
+	flowMu  sync.Mutex
+	flowSeq uint32
+	flows   map[uint32]chan []byte
 }
 
 // New validates cfg and returns a Dialer. The first Dial establishes the tunnel.
@@ -65,7 +71,7 @@ func New(cfg Config) (*Dialer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vpntun: resolve peer %q: %w", cfg.PeerAddr, err)
 	}
-	return &Dialer{cfg: cfg, peerAddr: pa}, nil
+	return &Dialer{cfg: cfg, peerAddr: pa, flows: make(map[uint32]chan []byte)}, nil
 }
 
 // Dial opens a new stream to target ("host:port") through the tunnel. It satisfies
@@ -84,20 +90,79 @@ func (d *Dialer) Dial(ctx context.Context, network, target string) (net.Conn, er
 	return stream, nil
 }
 
-// DialUDPStream opens a tunnel stream that relays UDP datagrams to target; the
-// caller frames each datagram with a uint16 length prefix (see mobile.udpConn) and
-// the server dials UDP and pipes them both ways.
-func (d *Dialer) DialUDPStream(target string) (net.Conn, error) {
+// UDPFlow is one client-side UDP flow through the tunnel: datagrams go out over the
+// Lane (unreliable, keyed by flow id), inbound datagrams arrive on a queue the
+// Dialer's dispatcher fills, and a control stream holds the flow open — closing it
+// tears the flow down on the server.
+type UDPFlow struct {
+	d       *Dialer
+	flow    uint32
+	lane    *mux.Lane
+	ctrl    net.Conn
+	inbound chan []byte
+}
+
+// Send writes one datagram to the flow's target.
+func (f *UDPFlow) Send(b []byte) (int, error) { return f.lane.SendDatagram(f.flow, b) }
+
+// Inbound delivers datagrams coming back from the target.
+func (f *UDPFlow) Inbound() <-chan []byte { return f.inbound }
+
+// Close tears the flow down.
+func (f *UDPFlow) Close() error {
+	f.d.removeFlow(f.flow)
+	return f.ctrl.Close()
+}
+
+// OpenUDP starts a UDP flow to target: it allocates a flow id, registers an inbound
+// queue, and opens the control stream. Datagrams then ride the Lane.
+func (d *Dialer) OpenUDP(target string) (*UDPFlow, error) {
 	sess, err := d.session()
 	if err != nil {
 		return nil, err
 	}
-	stream, err := tunnel.OpenUDP(sess, target)
-	if err != nil {
-		d.markDead(sess)
-		return nil, fmt.Errorf("vpntun: open udp stream to %s: %w", target, err)
+	d.mu.Lock()
+	lane := d.lane
+	d.mu.Unlock()
+	if lane == nil {
+		return nil, fmt.Errorf("vpntun: no datagram lane")
 	}
-	return stream, nil
+
+	d.flowMu.Lock()
+	d.flowSeq++
+	flow := d.flowSeq
+	inbound := make(chan []byte, 256)
+	d.flows[flow] = inbound
+	d.flowMu.Unlock()
+
+	ctrl, err := tunnel.OpenUDP(sess, target, flow)
+	if err != nil {
+		d.removeFlow(flow)
+		d.markDead(sess)
+		return nil, fmt.Errorf("vpntun: open udp flow to %s: %w", target, err)
+	}
+	return &UDPFlow{d: d, flow: flow, lane: lane, ctrl: ctrl, inbound: inbound}, nil
+}
+
+func (d *Dialer) removeFlow(flow uint32) {
+	d.flowMu.Lock()
+	delete(d.flows, flow)
+	d.flowMu.Unlock()
+}
+
+// dispatch routes an inbound datagram to its flow's queue (dropping if the queue is
+// full — UDP has no delivery guarantee). It runs on the Lane read loop.
+func (d *Dialer) dispatch(flow uint32, payload []byte) {
+	d.flowMu.Lock()
+	ch := d.flows[flow]
+	d.flowMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- payload:
+	default:
+	}
 }
 
 // Connect eagerly establishes the tunnel (creds, relay, PSK-DTLS, mux) so that
@@ -118,11 +183,15 @@ func (d *Dialer) session() (*smux.Session, error) {
 		return d.sess, nil
 	}
 	d.teardownLocked()
-	sess, closers, err := d.establish()
+	sess, lane, closers, err := d.establish()
 	if err != nil {
 		return nil, err
 	}
-	d.sess, d.closers = sess, closers
+	d.sess, d.lane, d.closers = sess, lane, closers
+	d.flowMu.Lock()
+	d.flows = make(map[uint32]chan []byte)
+	d.flowMu.Unlock()
+	lane.SetDatagramHandler(d.dispatch)
 	return sess, nil
 }
 
@@ -136,26 +205,26 @@ func (d *Dialer) markDead(sess *smux.Session) {
 
 // establish fetches creds, allocates a relay, PSK-DTLS-handshakes through it to the
 // VPS, and layers mux. Resources are returned for LIFO teardown.
-func (d *Dialer) establish() (*smux.Session, []io.Closer, error) {
+func (d *Dialer) establish() (*smux.Session, *mux.Lane, []io.Closer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	user, pass, turnAddr, err := d.cfg.Creds(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve creds: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolve creds: %w", err)
 	}
 	d.cfg.Logf("vpntun: got turn_server %s", turnAddr)
 
 	udp, err := net.ListenPacket("udp4", "0.0.0.0:0")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	closers := []io.Closer{udp}
-	fail := func(e error) (*smux.Session, []io.Closer, error) {
+	fail := func(e error) (*smux.Session, *mux.Lane, []io.Closer, error) {
 		for i := len(closers) - 1; i >= 0; i-- {
 			_ = closers[i].Close()
 		}
-		return nil, nil, e
+		return nil, nil, nil, e
 	}
 
 	tc, err := turn.NewClient(&turn.ClientConfig{
@@ -197,12 +266,12 @@ func (d *Dialer) establish() (*smux.Session, []io.Closer, error) {
 	}
 	closers = append(closers, dconn)
 
-	sess, err := mux.Client(dconn)
+	sess, lane, err := mux.Client(dconn)
 	if err != nil {
 		return fail(err)
 	}
 	d.cfg.Logf("vpntun: tunnel established")
-	return sess, closers, nil
+	return sess, lane, closers, nil
 }
 
 func (d *Dialer) teardownLocked() {
@@ -210,6 +279,7 @@ func (d *Dialer) teardownLocked() {
 		_ = d.sess.Close()
 		d.sess = nil
 	}
+	d.lane = nil // the lane wraps dconn (in closers); closing that ends its read loop
 	for i := len(d.closers) - 1; i >= 0; i-- {
 		_ = d.closers[i].Close()
 	}

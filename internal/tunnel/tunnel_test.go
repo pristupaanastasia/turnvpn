@@ -3,7 +3,6 @@ package tunnel_test
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -65,7 +64,7 @@ func pskServerOpts(secret string) []dtls.ServerOption {
 
 // buildTunnel wires the full stack over loopback with the given secrets on each end
 // and returns the client-side smux session. The server side runs tunnel.Serve.
-func buildTunnel(t *testing.T, serverSecret, clientSecret string) *smux.Session {
+func buildTunnel(t *testing.T, serverSecret, clientSecret string) (*smux.Session, *mux.Lane) {
 	t.Helper()
 
 	laddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
@@ -93,11 +92,11 @@ func buildTunnel(t *testing.T, serverSecret, clientSecret string) *smux.Session 
 				return
 			}
 		}
-		sess, err := mux.Server(conn)
+		sess, lane, err := mux.Server(conn)
 		if err != nil {
 			return
 		}
-		tunnel.Serve(sess, nil)
+		tunnel.Serve(sess, lane, nil)
 	}()
 
 	// Client side: DTLS dial + handshake + mux.
@@ -114,24 +113,25 @@ func buildTunnel(t *testing.T, serverSecret, clientSecret string) *smux.Session 
 	err = dconn.HandshakeContext(ctx)
 	cancel()
 	if err != nil {
-		return nil // caller decides whether this is expected (wrong secret)
+		return nil, nil // caller decides whether this is expected (wrong secret)
 	}
 	t.Cleanup(func() { _ = dconn.Close() })
-	csess, err := mux.Client(dconn)
+	csess, clane, err := mux.Client(dconn)
 	if err != nil {
 		t.Fatalf("mux client: %v", err)
 	}
 	t.Cleanup(func() { _ = csess.Close() })
-	return csess
+	return csess, clane
 }
 
 // TestEndToEnd: a byte sent through the whole stack reaches the origin and echoes
 // back, proving PSK-DTLS -> KCP -> smux -> target header -> dial -> pipe all work.
 func TestEndToEnd(t *testing.T) {
+	allowAllTargets(t)
 	origin, stop := echoOrigin(t)
 	defer stop()
 
-	sess := buildTunnel(t, testSecret, testSecret)
+	sess, _ := buildTunnel(t, testSecret, testSecret)
 	if sess == nil {
 		t.Fatal("tunnel did not establish with matching secrets")
 	}
@@ -159,10 +159,11 @@ func TestEndToEnd(t *testing.T) {
 // TestConcurrentStreams: several multiplexed streams over one tunnel each carry
 // their own payload independently (exercises smux multiplexing).
 func TestConcurrentStreams(t *testing.T) {
+	allowAllTargets(t)
 	origin, stop := echoOrigin(t)
 	defer stop()
 
-	sess := buildTunnel(t, testSecret, testSecret)
+	sess, _ := buildTunnel(t, testSecret, testSecret)
 	if sess == nil {
 		t.Fatal("tunnel did not establish")
 	}
@@ -224,52 +225,51 @@ func udpEchoOrigin(t *testing.T) (string, func()) {
 	return pc.LocalAddr().String(), func() { _ = pc.Close() }
 }
 
-// TestUDPRelay: datagrams framed over a tunnel stream reach a UDP peer and echo
-// back, proving OpenUDP -> handleUDP -> UDP dial -> relay both ways (Stage 7).
+// TestUDPRelay: datagrams sent over the unreliable Lane (keyed by flow id, set up by
+// a control stream) reach a UDP peer and echo back — OpenUDP -> handleUDP -> UDP dial
+// -> lane relay both ways (Stage 7), without riding the reliable stream.
 func TestUDPRelay(t *testing.T) {
+	allowAllTargets(t)
 	origin, stop := udpEchoOrigin(t)
 	defer stop()
 
-	sess := buildTunnel(t, testSecret, testSecret)
+	sess, lane := buildTunnel(t, testSecret, testSecret)
 	if sess == nil {
 		t.Fatal("tunnel did not establish")
 	}
 
-	stream, err := tunnel.OpenUDP(sess, origin)
+	const flow = uint32(42)
+	got := make(chan []byte, 16)
+	lane.SetDatagramHandler(func(f uint32, payload []byte) {
+		if f == flow {
+			got <- append([]byte(nil), payload...)
+		}
+	})
+
+	ctrl, err := tunnel.OpenUDP(sess, origin, flow)
 	if err != nil {
 		t.Fatalf("open udp: %v", err)
 	}
-	defer func() { _ = stream.Close() }()
+	defer func() { _ = ctrl.Close() }()
 
-	send := func(payload []byte) {
-		var lb [2]byte
-		binary.BigEndian.PutUint16(lb[:], uint16(len(payload)))
-		if _, err := stream.Write(append(lb[:], payload...)); err != nil {
-			t.Fatalf("write datagram: %v", err)
-		}
-	}
-	recv := func() []byte {
-		_ = stream.SetReadDeadline(time.Now().Add(10 * time.Second))
-		var lb [2]byte
-		if _, err := io.ReadFull(stream, lb[:]); err != nil {
-			t.Fatalf("read datagram len: %v", err)
-		}
-		b := make([]byte, int(binary.BigEndian.Uint16(lb[:])))
-		if _, err := io.ReadFull(stream, b); err != nil {
-			t.Fatalf("read datagram: %v", err)
-		}
-		return b
-	}
+	// Let the server accept the control stream and register the flow socket.
+	time.Sleep(300 * time.Millisecond)
 
-	// Several datagrams over one association, including a larger one.
 	for _, msg := range [][]byte{
 		[]byte("udp-datagram-one"),
 		[]byte("second"),
 		bytes.Repeat([]byte("x"), 1200),
 	} {
-		send(msg)
-		if got := recv(); !bytes.Equal(got, msg) {
-			t.Fatalf("udp echo = %q, want %q", got, msg)
+		if _, err := lane.SendDatagram(flow, msg); err != nil {
+			t.Fatalf("send datagram: %v", err)
+		}
+		select {
+		case echo := <-got:
+			if !bytes.Equal(echo, msg) {
+				t.Fatalf("udp echo = %q, want %q", echo, msg)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no echo for %q (lane relay)", msg)
 		}
 	}
 }
@@ -277,8 +277,62 @@ func TestUDPRelay(t *testing.T) {
 // TestWrongSecretNoTunnel: a client with the wrong secret cannot establish the
 // DTLS session, so no tunnel forms (the exit is not an open proxy).
 func TestWrongSecretNoTunnel(t *testing.T) {
-	sess := buildTunnel(t, "server-secret", "different-client-secret")
+	sess, _ := buildTunnel(t, "server-secret", "different-client-secret")
 	if sess != nil {
 		t.Fatal("tunnel established despite mismatched secrets")
+	}
+}
+
+// allowAllTargets relaxes the anti-SSRF guard for the duration of a test so the
+// loopback echo origins are reachable, then restores the default policy.
+func allowAllTargets(t *testing.T) {
+	t.Helper()
+	orig := tunnel.TargetAllowed
+	tunnel.TargetAllowed = func(net.IP) bool { return true }
+	t.Cleanup(func() { tunnel.TargetAllowed = orig })
+}
+
+// TestTargetAllowedDefault: the default SSRF policy blocks loopback, private,
+// link-local (incl. cloud metadata) and unspecified addresses, and permits
+// ordinary public addresses.
+func TestTargetAllowedDefault(t *testing.T) {
+	blocked := []string{
+		"127.0.0.1", "169.254.169.254", "10.0.0.1", "192.168.1.1",
+		"172.16.0.1", "::1", "fe80::1", "fc00::1", "0.0.0.0",
+	}
+	for _, s := range blocked {
+		if tunnel.TargetAllowed(net.ParseIP(s)) {
+			t.Errorf("TargetAllowed(%s) = true, want false (should be blocked)", s)
+		}
+	}
+	allowed := []string{"8.8.8.8", "1.1.1.1", "104.16.0.1", "2606:4700:4700::1111"}
+	for _, s := range allowed {
+		if !tunnel.TargetAllowed(net.ParseIP(s)) {
+			t.Errorf("TargetAllowed(%s) = false, want true (public)", s)
+		}
+	}
+}
+
+// TestBlockedTargetRefused: with the default guard, the server refuses to dial a
+// loopback target, so no data comes back (SSRF is closed end-to-end).
+func TestBlockedTargetRefused(t *testing.T) {
+	origin, stop := echoOrigin(t) // on 127.0.0.1 — blocked by the default guard
+	defer stop()
+
+	sess, _ := buildTunnel(t, testSecret, testSecret)
+	if sess == nil {
+		t.Fatal("tunnel did not establish")
+	}
+	stream, err := tunnel.Open(sess, origin)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	_, _ = stream.Write([]byte("ping"))
+	_ = stream.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 4)
+	if n, err := stream.Read(buf); err == nil && n > 0 {
+		t.Fatalf("got %q from a blocked loopback target; SSRF guard failed", buf[:n])
 	}
 }
