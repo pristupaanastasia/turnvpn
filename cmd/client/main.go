@@ -67,7 +67,7 @@ func defaultCreds(cfg config) CredsFunc {
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 listen address")
-	peer := flag.String("peer", "", "VPS exit host:port (running `server`)")
+	peer := flag.String("peer", "", "VPS exit host:port (running `server`); comma-separated list rotates across exits")
 	vkLink := flag.String("vk-link", "", "VK call join link token (from vk.ru/call/join/<token>)")
 	token := flag.String("token", "", "VK per-call guest token (a.token); or env TURN_CALL_TOKEN")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
@@ -95,9 +95,20 @@ func main() {
 	}
 	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey, secret: *secret, identity: *identity}
 
-	peerAddr, err := net.ResolveUDPAddr("udp4", cfg.peer)
-	if err != nil {
-		log.Fatalf("client: resolve peer %q: %v", cfg.peer, err)
+	var peerAddrs []*net.UDPAddr
+	for _, p := range strings.Split(cfg.peer, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		a, err := net.ResolveUDPAddr("udp4", p)
+		if err != nil {
+			log.Fatalf("client: resolve peer %q: %v", p, err)
+		}
+		peerAddrs = append(peerAddrs, a)
+	}
+	if len(peerAddrs) == 0 {
+		log.Fatal("client: -peer is required (one or more VPS exits, comma-separated)")
 	}
 	// Credential source. An explicit -token uses the human-in-the-loop path (derive
 	// turn_server from a browser-captured call token; no captcha solving). Otherwise
@@ -115,7 +126,7 @@ func main() {
 			return captcha.GetVkCredsCached(ctx, s, streamID, dialer)
 		}
 	}
-	p := newPool(cfg, peerAddr, creds, *tunnels, *refresh)
+	p := newPool(cfg, peerAddrs, creds, *tunnels, *refresh)
 	defer p.close()
 
 	ln, err := net.Listen("tcp", cfg.listen)
@@ -146,11 +157,12 @@ type pool struct {
 	wg      sync.WaitGroup
 }
 
-func newPool(cfg config, peerAddr *net.UDPAddr, creds CredsFunc, n int, ttl time.Duration) *pool {
+func newPool(cfg config, peerAddrs []*net.UDPAddr, creds CredsFunc, n int, ttl time.Duration) *pool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &pool{cancel: cancel, tunnels: make([]*tunnel, n)}
 	for i := range p.tunnels {
-		t := &tunnel{cfg: cfg, peerAddr: peerAddr, creds: creds, streamID: i, ttl: ttl, ready: make(chan struct{})}
+		// Spread tunnels across the available exits; each re-establish rotates on.
+		t := &tunnel{cfg: cfg, peers: peerAddrs, peerIdx: i, creds: creds, streamID: i, ttl: ttl, ready: make(chan struct{})}
 		p.tunnels[i] = t
 		p.wg.Add(1)
 		go func(t *tunnel) { defer p.wg.Done(); t.run(ctx) }(t)
@@ -174,24 +186,109 @@ func (p *pool) close() {
 func serveLocal(t *tunnel, c net.Conn) {
 	defer func() { _ = c.Close() }()
 
-	target, err := socks.Handshake(c)
+	cmd, target, err := socks.Request(c)
 	if err != nil {
 		log.Printf("client: socks: %v", err)
 		return
 	}
-	sess, err := t.get()
+	ref, err := t.getRef()
 	if err != nil {
 		log.Printf("client: tunnel unavailable: %v", err)
 		return
 	}
-	stream, err := tun.Open(sess, target)
+
+	switch cmd {
+	case socks.CmdConnect:
+		if err := socks.ReplyConnect(c); err != nil {
+			return
+		}
+		stream, err := tun.Open(ref.sess, target)
+		if err != nil {
+			// Session likely just died; its manager goroutine will reconnect it.
+			log.Printf("client: open stream for %s: %v", target, err)
+			return
+		}
+		defer func() { _ = stream.Close() }()
+		tun.Pipe(c, stream)
+	case socks.CmdUDPAssociate:
+		serveUDPAssociate(ref.udp, c)
+	default:
+		log.Printf("client: unsupported SOCKS command %d", cmd)
+	}
+}
+
+// serveUDPAssociate runs one SOCKS5 UDP ASSOCIATE: it binds a local UDP relay, tells
+// the client its address, and bridges the client's encapsulated datagrams to tunnel
+// UDP flows (one per target) and the replies back. The association lives until the
+// control TCP connection c closes.
+func serveUDPAssociate(udp *tun.UDPFlows, c net.Conn) {
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		// Session likely just died; its manager goroutine will reconnect it.
-		log.Printf("client: open stream for %s: %v", target, err)
+		log.Printf("client: udp associate bind: %v", err)
 		return
 	}
-	defer func() { _ = stream.Close() }()
-	tun.Pipe(c, stream)
+	defer func() { _ = pc.Close() }()
+	if err := socks.ReplyUDPAssociate(c, pc.LocalAddr().(*net.UDPAddr)); err != nil {
+		return
+	}
+	// When the control connection closes, tear the association down.
+	go func() { _, _ = io.Copy(io.Discard, c); _ = pc.Close() }()
+
+	var mu sync.Mutex
+	var clientAddr *net.UDPAddr
+	flows := make(map[string]*tun.ClientUDPFlow)
+	defer func() {
+		mu.Lock()
+		for _, f := range flows {
+			_ = f.Close()
+		}
+		mu.Unlock()
+	}()
+
+	buf := make([]byte, 64*1024)
+	for {
+		n, addr, err := pc.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		target, payload, err := socks.DecodeUDP(buf[:n])
+		if err != nil {
+			continue
+		}
+		mu.Lock()
+		clientAddr = addr
+		f := flows[target]
+		if f == nil {
+			f, err = udp.Open(target)
+			if err != nil {
+				mu.Unlock()
+				continue
+			}
+			flows[target] = f
+			// Pump replies from this flow back to the client, SOCKS-encapsulated.
+			go func(f *tun.ClientUDPFlow, target string) {
+				for {
+					select {
+					case p := <-f.Inbound():
+						out, err := socks.EncodeUDP(target, p)
+						if err != nil {
+							continue
+						}
+						mu.Lock()
+						ca := clientAddr
+						mu.Unlock()
+						if ca != nil {
+							_, _ = pc.WriteToUDP(out, ca)
+						}
+					case <-f.Done():
+						return
+					}
+				}
+			}(f, target)
+		}
+		mu.Unlock()
+		_ = f.Send(payload)
+	}
 }
 
 // Tunnel lifetime tuning. TURN credentials live ~10 min, so refresh well before
@@ -205,6 +302,7 @@ const (
 // the whole tunnel down (TURN client, relay allocation, DTLS conn).
 type sessRef struct {
 	sess    *smux.Session
+	udp     *tun.UDPFlows // UDP flows (SOCKS UDP ASSOCIATE) over this session's lane
 	closers []io.Closer
 }
 
@@ -225,10 +323,11 @@ func (r *sessRef) teardown() {
 // expire. A pool holds several. get() hands out the current live session.
 type tunnel struct {
 	cfg      config
-	peerAddr *net.UDPAddr
-	creds    CredsFunc     // pluggable credential acquisition; see CredsFunc
-	streamID int           // identifies this tunnel to creds (for cred-cache sharding)
-	ttl      time.Duration // proactively refresh the session after this long
+	peers    []*net.UDPAddr // exit(s); rotated across on each (re)establish
+	peerIdx  int            // next exit to use (only touched by run()/establish())
+	creds    CredsFunc      // pluggable credential acquisition; see CredsFunc
+	streamID int            // identifies this tunnel to creds (for cred-cache sharding)
+	ttl      time.Duration  // proactively refresh the session after this long
 
 	mu        sync.RWMutex
 	cur       *sessRef
@@ -245,7 +344,7 @@ func (t *tunnel) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		sess, closers, err := t.establish()
+		sess, lane, closers, err := t.establish()
 		if err != nil {
 			log.Printf("client: tunnel %d establish: %v (retry in %s)", t.streamID, err, backoff)
 			if !sleepCtx(ctx, backoff) {
@@ -255,7 +354,7 @@ func (t *tunnel) run(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second
-		ref := &sessRef{sess: sess, closers: closers}
+		ref := &sessRef{sess: sess, udp: tun.NewUDPFlows(sess, lane), closers: closers}
 		t.setCur(ref)
 		log.Printf("client: tunnel %d up (relay %s)", t.streamID, sess.LocalAddr())
 
@@ -285,8 +384,9 @@ func (t *tunnel) setCur(ref *sessRef) {
 	t.readyOnce.Do(func() { close(t.ready) })
 }
 
-// get returns the current live session, waiting for the first establish if needed.
-func (t *tunnel) get() (*smux.Session, error) {
+// getRef returns the current live session ref (session + UDP flows), waiting for the
+// first establish if needed.
+func (t *tunnel) getRef() (*sessRef, error) {
 	select {
 	case <-t.ready:
 	case <-time.After(45 * time.Second):
@@ -298,7 +398,7 @@ func (t *tunnel) get() (*smux.Session, error) {
 	if cur == nil || cur.sess.IsClosed() {
 		return nil, fmt.Errorf("tunnel %d unavailable", t.streamID)
 	}
-	return cur.sess, nil
+	return cur, nil
 }
 
 // retire closes a replaced session, but first lets its in-flight streams drain for up
@@ -317,26 +417,32 @@ func retire(ref *sessRef, grace time.Duration) {
 // establish resolves fresh TURN creds (via the pluggable t.creds), allocates a relay,
 // DTLS-handshakes through it to the VPS, and returns a smux client session plus the
 // resources to close in LIFO.
-func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
-	cfg, peerAddr := t.cfg, t.peerAddr
+func (t *tunnel) establish() (*smux.Session, *mux.Lane, []io.Closer, error) {
+	cfg := t.cfg
+	// Rotate to the next exit so a blocked or dead VPS is avoided on reconnect.
+	peerAddr := t.peers[t.peerIdx%len(t.peers)]
+	t.peerIdx++
+	if len(t.peers) > 1 {
+		log.Printf("client: tunnel %d exit -> %s", t.streamID, peerAddr)
+	}
 	// Resolving creds includes a person solving the captcha (up to 3 minutes).
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
 	user, pass, turnAddr, err := t.creds(ctx, cfg.vkLink, t.streamID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve creds: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolve creds: %w", err)
 	}
 	log.Printf("client: got turn_server %s", turnAddr)
 
 	udp, err := net.ListenPacket("udp4", "0.0.0.0:0")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	closers := []io.Closer{udp}
-	fail := func(e error) (*smux.Session, []io.Closer, error) {
+	fail := func(e error) (*smux.Session, *mux.Lane, []io.Closer, error) {
 		closeAll(closers)
-		return nil, nil, e
+		return nil, nil, nil, e
 	}
 
 	tc, err := turn.NewClient(&turn.ClientConfig{
@@ -389,12 +495,12 @@ func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
 	}
 	closers = append(closers, dconn)
 
-	sess, _, err := mux.Client(dconn)
+	sess, lane, err := mux.Client(dconn)
 	if err != nil {
 		return fail(err)
 	}
 	log.Printf("client: tunnel established (relay %s)", relay.LocalAddr())
-	return sess, closers, nil
+	return sess, lane, closers, nil
 }
 
 // fetchTurnCreds runs the minimal OK join to extract the call's TURN credentials:
