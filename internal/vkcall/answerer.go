@@ -47,7 +47,8 @@ type Answerer struct {
 	pc  peerConn
 
 	// Logf, if set, receives non-fatal diagnostics (a bad candidate, a trickle
-	// send error). nil discards them.
+	// send error). nil discards them. It may be called from pion's ICE goroutine
+	// as well as from Run, so it must be safe for concurrent use (log.Printf is).
 	Logf func(string, ...any)
 
 	mu            sync.Mutex
