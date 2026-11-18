@@ -24,13 +24,16 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/bschaatsbergen/dnsdialer"
 	"github.com/google/uuid"
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/logging"
 	"github.com/pion/turn/v5"
+	"github.com/pristupaanastasia/turnvpn/internal/captcha"
 	"github.com/xtaci/smux"
 
 	"github.com/pristupaanastasia/turnvpn/internal/mux"
@@ -67,7 +70,12 @@ func main() {
 	vkLink := flag.String("vk-link", "", "VK call join link token (from vk.ru/call/join/<token>)")
 	token := flag.String("token", "", "VK per-call guest token (a.token); or env TURN_CALL_TOKEN")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
+	tunnels := flag.Int("tunnels", 2, "number of parallel tunnels (streams are round-robined across them for throughput)")
 	flag.Parse()
+
+	if *tunnels < 1 {
+		*tunnels = 1
+	}
 
 	if *token == "" {
 		*token = os.Getenv("TURN_CALL_TOKEN")
@@ -81,18 +89,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("client: resolve peer %q: %v", cfg.peer, err)
 	}
-
-	t := &tunnel{cfg: cfg, peerAddr: peerAddr, creds: defaultCreds(cfg)}
-	// To use automatic credential acquisition (e.g. a captcha-solving fetcher that
-	// matches CredsFunc), assign it here instead:  t.creds = <yourCredsFunc>
-	defer t.close()
+	dialer := dnsdialer.New(
+		dnsdialer.WithResolvers("77.88.8.8:53", "77.88.8.1:53", "8.8.8.8:53", "8.8.4.4:53", "1.1.1.1:53", "1.0.0.1:53"),
+		dnsdialer.WithStrategy(dnsdialer.Fallback{}),
+		dnsdialer.WithCache(100, 10*time.Hour, 10*time.Hour),
+	)
+	getCreds := func(ctx context.Context, s string, streamID int) (string, string, string, error) {
+		return captcha.GetVkCredsCached(ctx, s, streamID, dialer)
+	}
+	p := newPool(cfg, peerAddr, getCreds, *tunnels)
+	defer p.close()
 
 	ln, err := net.Listen("tcp", cfg.listen)
 	if err != nil {
 		log.Fatalf("client: SOCKS5 listen on %s: %v", cfg.listen, err)
 	}
 	defer func() { _ = ln.Close() }()
-	log.Printf("client: SOCKS5 on %s  ->  tunnel  ->  %s (exit)", cfg.listen, cfg.peer)
+	log.Printf("client: SOCKS5 on %s  ->  %d tunnel(s)  ->  %s (exit)", cfg.listen, *tunnels, cfg.peer)
 
 	for {
 		c, err := ln.Accept()
@@ -100,7 +113,35 @@ func main() {
 			log.Printf("client: accept: %v", err)
 			continue
 		}
-		go serveLocal(t, c)
+		go serveLocal(p.pick(), c)
+	}
+}
+
+// pool holds several tunnels and hands them out round-robin, so concurrent SOCKS
+// connections spread across independent TURN allocations (more throughput, and one
+// dead tunnel doesn't stall the others). Each tunnel self-heals on its next use.
+type pool struct {
+	tunnels []*tunnel
+	next    atomic.Uint32
+}
+
+func newPool(cfg config, peerAddr *net.UDPAddr, creds CredsFunc, n int) *pool {
+	p := &pool{tunnels: make([]*tunnel, n)}
+	for i := range p.tunnels {
+		p.tunnels[i] = &tunnel{cfg: cfg, peerAddr: peerAddr, creds: creds, streamID: i}
+	}
+	return p
+}
+
+// pick returns the next tunnel round-robin.
+func (p *pool) pick() *tunnel {
+	i := p.next.Add(1) - 1
+	return p.tunnels[int(i)%len(p.tunnels)]
+}
+
+func (p *pool) close() {
+	for _, t := range p.tunnels {
+		t.close()
 	}
 }
 
@@ -133,11 +174,13 @@ func serveLocal(t *tunnel, c net.Conn) {
 	pipe(c, stream)
 }
 
-// tunnel holds the current smux session and lazily (re)establishes it.
+// tunnel holds the current smux session and lazily (re)establishes it. One tunnel is
+// a single DTLS/KCP/smux session over one TURN allocation; a pool holds several.
 type tunnel struct {
 	cfg      config
 	peerAddr *net.UDPAddr
 	creds    CredsFunc // pluggable credential acquisition; see CredsFunc
+	streamID int       // identifies this tunnel to creds (for cred-cache sharding)
 
 	mu      sync.Mutex
 	sess    *smux.Session
@@ -194,7 +237,7 @@ func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	user, pass, turnAddr, err := t.creds(ctx, cfg.vkLink, 0)
+	user, pass, turnAddr, err := t.creds(ctx, cfg.vkLink, t.streamID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve creds: %w", err)
 	}
