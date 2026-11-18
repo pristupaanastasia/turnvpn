@@ -219,6 +219,10 @@ func (c *Client) GetCallTokenRetry(ctx context.Context, accessToken, joinLink, n
 	if attempts < 1 {
 		attempts = 1
 	}
+	maxDelay := p.MaxDelay
+	if maxDelay <= 0 {
+		maxDelay = time.Hour // sanity bound when uncapped, also guards delay overflow
+	}
 	delay := p.BaseDelay
 	for i := 0; i < attempts; i++ {
 		tok, err := c.GetCallToken(ctx, accessToken, joinLink, name)
@@ -229,19 +233,23 @@ func (c *Client) GetCallTokenRetry(ctx context.Context, accessToken, joinLink, n
 		if !errors.As(err, &fe) || i == attempts-1 {
 			return "", err // not flood, or no attempts left
 		}
+		// Jitter first, then clamp, so cap is a hard upper bound on the wait.
 		d := delay
-		if p.MaxDelay > 0 && d > p.MaxDelay {
-			d = p.MaxDelay
-		}
 		if d > 0 {
 			d += time.Duration(rand.Int63n(int64(d)/2 + 1)) // up to +50% jitter
 		}
+		if d > maxDelay {
+			d = maxDelay
+		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", fmt.Errorf("%w (last: %v)", ctx.Err(), err)
 		case <-time.After(d):
 		}
 		delay *= 2
+		if delay > maxDelay || delay <= 0 { // clamp growth; <=0 catches overflow
+			delay = maxDelay
+		}
 	}
 	return "", errors.New("vkapi: GetCallTokenRetry exhausted attempts")
 }
