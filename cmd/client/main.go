@@ -71,6 +71,7 @@ func main() {
 	token := flag.String("token", "", "VK per-call guest token (a.token); or env TURN_CALL_TOKEN")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
 	tunnels := flag.Int("tunnels", 2, "number of parallel tunnels (streams are round-robined across them for throughput)")
+	refresh := flag.Duration("refresh", tunnelTTL, "proactively refresh each tunnel's session after this interval (before its ~10m creds expire)")
 	flag.Parse()
 
 	if *tunnels < 1 {
@@ -80,8 +81,8 @@ func main() {
 	if *token == "" {
 		*token = os.Getenv("TURN_CALL_TOKEN")
 	}
-	if *peer == "" || *vkLink == "" || *token == "" {
-		log.Fatal("usage: client -peer vps:port -vk-link <link> -token <call-token> [-listen 127.0.0.1:1080]")
+	if *peer == "" || *vkLink == "" {
+		log.Fatal("usage: client -peer vps:port -vk-link <link> [-token <call-token>] [-tunnels N] [-listen 127.0.0.1:1080]")
 	}
 	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey}
 
@@ -89,15 +90,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("client: resolve peer %q: %v", cfg.peer, err)
 	}
-	dialer := dnsdialer.New(
-		dnsdialer.WithResolvers("77.88.8.8:53", "77.88.8.1:53", "8.8.8.8:53", "8.8.4.4:53", "1.1.1.1:53", "1.0.0.1:53"),
-		dnsdialer.WithStrategy(dnsdialer.Fallback{}),
-		dnsdialer.WithCache(100, 10*time.Hour, 10*time.Hour),
-	)
-	getCreds := func(ctx context.Context, s string, streamID int) (string, string, string, error) {
-		return captcha.GetVkCredsCached(ctx, s, streamID, dialer)
+	// Credential source. An explicit -token uses the human-in-the-loop path (derive
+	// turn_server from a browser-captured call token; no captcha solving). Otherwise
+	// fall back to the pluggable solver wired here.
+	var creds CredsFunc
+	if cfg.token != "" {
+		creds = defaultCreds(cfg)
+	} else {
+		dialer := dnsdialer.New(
+			dnsdialer.WithResolvers("77.88.8.8:53", "77.88.8.1:53", "8.8.8.8:53", "8.8.4.4:53", "1.1.1.1:53", "1.0.0.1:53"),
+			dnsdialer.WithStrategy(dnsdialer.Fallback{}),
+			dnsdialer.WithCache(100, 10*time.Hour, 10*time.Hour),
+		)
+		creds = func(ctx context.Context, s string, streamID int) (string, string, string, error) {
+			return captcha.GetVkCredsCached(ctx, s, streamID, dialer)
+		}
 	}
-	p := newPool(cfg, peerAddr, getCreds, *tunnels)
+	p := newPool(cfg, peerAddr, creds, *tunnels, *refresh)
 	defer p.close()
 
 	ln, err := net.Listen("tcp", cfg.listen)
@@ -128,11 +137,11 @@ type pool struct {
 	wg      sync.WaitGroup
 }
 
-func newPool(cfg config, peerAddr *net.UDPAddr, creds CredsFunc, n int) *pool {
+func newPool(cfg config, peerAddr *net.UDPAddr, creds CredsFunc, n int, ttl time.Duration) *pool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &pool{cancel: cancel, tunnels: make([]*tunnel, n)}
 	for i := range p.tunnels {
-		t := &tunnel{cfg: cfg, peerAddr: peerAddr, creds: creds, streamID: i, ready: make(chan struct{})}
+		t := &tunnel{cfg: cfg, peerAddr: peerAddr, creds: creds, streamID: i, ttl: ttl, ready: make(chan struct{})}
 		p.tunnels[i] = t
 		p.wg.Add(1)
 		go func(t *tunnel) { defer p.wg.Done(); t.run(ctx) }(t)
@@ -212,8 +221,9 @@ func (r *sessRef) teardown() {
 type tunnel struct {
 	cfg      config
 	peerAddr *net.UDPAddr
-	creds    CredsFunc // pluggable credential acquisition; see CredsFunc
-	streamID int       // identifies this tunnel to creds (for cred-cache sharding)
+	creds    CredsFunc     // pluggable credential acquisition; see CredsFunc
+	streamID int           // identifies this tunnel to creds (for cred-cache sharding)
+	ttl      time.Duration // proactively refresh the session after this long
 
 	mu        sync.RWMutex
 	cur       *sessRef
@@ -244,7 +254,7 @@ func (t *tunnel) run(ctx context.Context) {
 		t.setCur(ref)
 		log.Printf("client: tunnel %d up (relay %s)", t.streamID, sess.LocalAddr())
 
-		timer := time.NewTimer(tunnelTTL)
+		timer := time.NewTimer(t.ttl)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -304,7 +314,8 @@ func retire(ref *sessRef, grace time.Duration) {
 // resources to close in LIFO.
 func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
 	cfg, peerAddr := t.cfg, t.peerAddr
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	// Resolving creds includes a person solving the captcha (up to 3 minutes).
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
 	user, pass, turnAddr, err := t.creds(ctx, cfg.vkLink, t.streamID)

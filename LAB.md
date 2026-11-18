@@ -6,6 +6,47 @@
 
 ---
 
+## 2026-11-18 — Stage 5: живой end-to-end через пул + авто-рефреш (капча — ручной фолбэк)
+
+**Stage:** Vector 1 / Stage 5 · **Verdict:** ✅ транспорт (пул + рефреш) подтверждён вживую
+
+- **Tried:** прогон `cmd/client` с `-tunnels 2`; креды — через seam (пользовательский
+  `captcha.GetVkCredsCached`). Транспортный код (пул, фоновый менеджер `run()`,
+  авто-рефреш, retire) — мой.
+- **Result:** авто-решение капчи **не прошло** (падает на `missing captcha_sid`) и
+  **ушло в ручной фолбэк** — капчу решил человек в браузере (`localhost:8765`,
+  «MANUAL CAPTCHA SOLVING NEEDED»). После этого `Success client_id=6287487` →
+  **оба туннеля поднялись на ОДНИХ кредах**: `tunnel 0 up` + `tunnel 1 up`, оба реле
+  `95.163.34.180` (шаринг кредов в пуле работает). Проверка коннекта:
+  `curl --socks5-hostname :1080 https://api.ipify.org` → **<VPS>** (IP VPS);
+  `example.com` → `HTTP/2 200`.
+- **Evidence:** лог клиента (оба `tunnel N up`) + curl exit-IP = VPS + 200.
+- **Conclusion:** пул из N туннелей и транспорт **держат трафик вживую**, один проход
+  капчи кормит весь пул. Капча проходится **человеком** (ручной фолбэк) — это и есть
+  human-in-the-loop путь. Авто-обход капчи у пользователя пока не работает (его код).
+- **Next:** footprint-шейп битрейта; наблюсти полный цикл авто-рефреша (повтор
+  `tunnel N up` с новым реле через `-refresh`).
+
+## 2026-11-18 — ручная капча: чанки 404, ожидание 40 с
+
+**Stage:** Vector 1 / креды · **Verdict:** 🔶 страница не собиралась; правка локального прокси
+
+- **Tried:** человек открыл `localhost:8765`, прокси отдал HTML `not_robot_captcha` (200).
+- **Result:** следом `GET /chunks/js/394.*.js` и `/chunks/css/...` → **404** `text/html; charset=windows-1251`. Через ~40 с клиент оборвал ожидание (`context deadline exceeded`), хотя лимит ручного шага был 3 минуты.
+- **Evidence:** лог прокси; публичный HTML капчи ссылается на `https://st.vk.ru/vkid/vkid-bff/dist/projects/notRobotCaptcha-web/entrypoints/entry.*.js`. В бандле `publicPath` считается из URL скрипта, query отрезается. Чанк `.../chunks/js/394.e400a060.js` на `st.vk.ru` отвечает 200.
+- **Conclusion:** прокси переписывал `st.vk.ru` в `/generic_proxy?proxy_url=...`, webpack терял каталог и просил `/chunks/` у `id.vk.ru`. Отдельный потолок — `establish` давал на креды только 40 с.
+- **Next:** пересобрать `./client` и пройти капчу в открывшемся окне. Скрипты должны грузиться с `st.vk.ru`, не с `localhost/chunks`.
+
+## 2026-11-18 — getAnonymousToken: капча без captcha_sid
+
+**Stage:** Vector 1 / креды · **Verdict:** 🔶 разбор починен, решение — человек в браузере
+
+- **Tried:** клиент без `-token` на `calls.getAnonymousToken`.
+- **Result:** VK отвечает `error_code:14`, `is_enabled_captcha:true` и `redirect_uri` на `id.vk.ru/not_robot_captcha`. Полей `captcha_sid` и `captcha_img` в ответе нет. Парсер из-за этого возвращал nil, клиент печатал сырую ошибку и перебирал `client_id`.
+- **Evidence:** лог клиента (`missing captcha_sid` / дальше `VK API error` с тем же телом).
+- **Conclusion:** это страница «я не робот» для человека. Авто-решатель на этот ответ не включается. Клиент открывает локальную страницу и ждёт, пока человек пройдёт капчу (окно 3 минуты).
+- **Next:** пересобрать `./client`, остановить зависший процесс и запустить заново. В браузере пройти капчу на `localhost:8765`.
+
 ## 2026-11-18 — 🏁 Stage 1-3: реальный браузинг через туннель РАБОТАЕТ
 
 **Stage:** Vector 1 / Stage 1-3 · **Verdict:** ✅ **PASS — HTTPS сквозь whitelisted TURN ВК**
