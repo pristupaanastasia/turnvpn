@@ -39,6 +39,7 @@ import (
 	"github.com/pristupaanastasia/turnvpn/internal/mux"
 	"github.com/pristupaanastasia/turnvpn/internal/okapi"
 	"github.com/pristupaanastasia/turnvpn/internal/socks"
+	tun "github.com/pristupaanastasia/turnvpn/internal/tunnel"
 )
 
 type config struct {
@@ -182,18 +183,14 @@ func serveLocal(t *tunnel, c net.Conn) {
 		log.Printf("client: tunnel unavailable: %v", err)
 		return
 	}
-	stream, err := sess.OpenStream()
+	stream, err := tun.Open(sess, target)
 	if err != nil {
 		// Session likely just died; its manager goroutine will reconnect it.
-		log.Printf("client: open stream: %v", err)
+		log.Printf("client: open stream for %s: %v", target, err)
 		return
 	}
 	defer func() { _ = stream.Close() }()
-	if err := socks.WriteTarget(stream, target); err != nil {
-		log.Printf("client: write target %s: %v", target, err)
-		return
-	}
-	pipe(c, stream)
+	tun.Pipe(c, stream)
 }
 
 // Tunnel lifetime tuning. TURN credentials live ~10 min, so refresh well before
@@ -421,21 +418,6 @@ func turnHostPort(u string) string {
 	u = strings.TrimPrefix(u, "turns:")
 	u = strings.TrimPrefix(u, "turn:")
 	return u
-}
-
-// pipe copies bytes both ways between a and b until either side ends.
-func pipe(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
-		_, _ = io.Copy(dst, src)
-		done <- struct{}{}
-	}
-	go cp(a, b)
-	go cp(b, a)
-	<-done
-	_ = a.Close()
-	_ = b.Close()
-	<-done
 }
 
 type closerFunc func() error

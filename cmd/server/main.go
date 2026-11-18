@@ -10,19 +10,16 @@ package main
 import (
 	"context"
 	"flag"
-	"io"
 	"log"
 	"net"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/pion/dtls/v3"
-	"github.com/xtaci/smux"
 
 	"github.com/pristupaanastasia/turnvpn/internal/authdtls"
 	"github.com/pristupaanastasia/turnvpn/internal/mux"
-	"github.com/pristupaanastasia/turnvpn/internal/socks"
+	"github.com/pristupaanastasia/turnvpn/internal/tunnel"
 )
 
 func main() {
@@ -90,52 +87,6 @@ func serve(conn net.Conn) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	var wg sync.WaitGroup
-	for {
-		stream, err := sess.AcceptStream()
-		if err != nil {
-			break // session closed
-		}
-		wg.Add(1)
-		go func(s *smux.Stream) {
-			defer wg.Done()
-			handleStream(s)
-		}(stream)
-	}
-	wg.Wait()
+	tunnel.Serve(sess, log.Printf)
 	log.Printf("server: tunnel down from %s", ra)
-}
-
-// handleStream reads the stream's target header and pipes it to a dialed TCP peer.
-func handleStream(s *smux.Stream) {
-	defer func() { _ = s.Close() }()
-
-	target, err := socks.ReadTarget(s)
-	if err != nil {
-		log.Printf("server: stream %d: read target: %v", s.ID(), err)
-		return
-	}
-	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
-	if err != nil {
-		log.Printf("server: dial %s: %v", target, err)
-		return
-	}
-	defer func() { _ = remote.Close() }()
-	pipe(s, remote)
-}
-
-// pipe copies bytes both ways between a and b until either side ends, then unblocks
-// the other direction by closing both.
-func pipe(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
-		_, _ = io.Copy(dst, src)
-		done <- struct{}{}
-	}
-	go cp(a, b)
-	go cp(b, a)
-	<-done
-	_ = a.Close()
-	_ = b.Close()
-	<-done
 }
