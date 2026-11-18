@@ -30,19 +30,19 @@ import (
 	"github.com/bschaatsbergen/dnsdialer"
 	"github.com/google/uuid"
 	"github.com/pion/dtls/v3"
-	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/logging"
 	"github.com/pion/turn/v5"
 	"github.com/pristupaanastasia/turnvpn/internal/captcha"
 	"github.com/xtaci/smux"
 
+	"github.com/pristupaanastasia/turnvpn/internal/authdtls"
 	"github.com/pristupaanastasia/turnvpn/internal/mux"
 	"github.com/pristupaanastasia/turnvpn/internal/okapi"
 	"github.com/pristupaanastasia/turnvpn/internal/socks"
 )
 
 type config struct {
-	listen, peer, vkLink, token, appKey string
+	listen, peer, vkLink, token, appKey, secret string
 }
 
 // CredsFunc resolves the call's TURN credentials for a (re)connect: given the join
@@ -70,6 +70,7 @@ func main() {
 	vkLink := flag.String("vk-link", "", "VK call join link token (from vk.ru/call/join/<token>)")
 	token := flag.String("token", "", "VK per-call guest token (a.token); or env TURN_CALL_TOKEN")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
+	secret := flag.String("secret", "", "shared secret for mutual DTLS auth, must match the server (or env TURNVPN_SECRET); REQUIRED")
 	tunnels := flag.Int("tunnels", 2, "number of parallel tunnels (streams are round-robined across them for throughput)")
 	refresh := flag.Duration("refresh", tunnelTTL, "proactively refresh each tunnel's session after this interval (before its ~10m creds expire)")
 	flag.Parse()
@@ -81,10 +82,16 @@ func main() {
 	if *token == "" {
 		*token = os.Getenv("TURN_CALL_TOKEN")
 	}
-	if *peer == "" || *vkLink == "" {
-		log.Fatal("usage: client -peer vps:port -vk-link <link> [-token <call-token>] [-tunnels N] [-listen 127.0.0.1:1080]")
+	if *secret == "" {
+		*secret = os.Getenv("TURNVPN_SECRET")
 	}
-	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey}
+	if *peer == "" || *vkLink == "" {
+		log.Fatal("usage: client -peer vps:port -vk-link <link> -secret <shared> [-token <call-token>] [-tunnels N] [-listen 127.0.0.1:1080]")
+	}
+	if *secret == "" {
+		log.Fatal("client: -secret (or env TURNVPN_SECRET) is required and must match the server")
+	}
+	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey, secret: *secret}
 
 	peerAddr, err := net.ResolveUDPAddr("udp4", cfg.peer)
 	if err != nil {
@@ -360,15 +367,14 @@ func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
 		return fail(fmt.Errorf("permission: %w", err))
 	}
 
-	cert, err := selfsign.GenerateSelfSigned()
-	if err != nil {
-		return fail(err)
-	}
+	// Mutual PSK authentication: the handshake only completes if the server holds
+	// the same secret, which authenticates the exit (no MITM) and keeps forward
+	// secrecy via the ECDHE-PSK suite.
 	dconn, err := dtls.ClientWithOptions(relay, peerAddr,
-		dtls.WithCertificates(cert),
-		dtls.WithInsecureSkipVerify(true),
+		dtls.WithPSK(authdtls.PSK(cfg.secret)),
+		dtls.WithPSKIdentityHint(authdtls.IdentityHint()),
+		dtls.WithCipherSuites(authdtls.Cipher),
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
-		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
 	)
 	if err != nil {
 		return fail(err)

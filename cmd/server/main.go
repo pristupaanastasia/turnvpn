@@ -13,36 +13,42 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/pion/dtls/v3"
-	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/xtaci/smux"
 
+	"github.com/pristupaanastasia/turnvpn/internal/authdtls"
 	"github.com/pristupaanastasia/turnvpn/internal/mux"
 	"github.com/pristupaanastasia/turnvpn/internal/socks"
 )
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "UDP address to listen on for DTLS")
+	secret := flag.String("secret", "", "shared secret for mutual DTLS auth (or env TURNVPN_SECRET); REQUIRED")
 	flag.Parse()
+
+	if *secret == "" {
+		*secret = os.Getenv("TURNVPN_SECRET")
+	}
+	if *secret == "" {
+		log.Fatal("server: -secret (or env TURNVPN_SECRET) is required — it authenticates clients so the exit is not an open proxy")
+	}
 
 	laddr, err := net.ResolveUDPAddr("udp", *listen)
 	if err != nil {
 		log.Fatalf("server: resolve %q: %v", *listen, err)
 	}
-	// Self-signed is fine: DTLS here is a transport wrapper (disguise + channel
-	// encryption), not an identity system. The client uses InsecureSkipVerify.
-	cert, err := selfsign.GenerateSelfSigned()
-	if err != nil {
-		log.Fatalf("server: self-signed cert: %v", err)
-	}
 
+	// Mutual PSK authentication: only a client holding the same secret can complete
+	// the DTLS handshake, so the exit is not an open proxy and cannot be MITM'd.
 	ln, err := dtls.ListenWithOptions("udp", laddr,
-		dtls.WithCertificates(cert),
+		dtls.WithPSK(authdtls.PSK(*secret)),
+		dtls.WithPSKIdentityHint(authdtls.IdentityHint()),
+		dtls.WithCipherSuites(authdtls.Cipher),
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
-		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
 	)
 	if err != nil {
 		log.Fatalf("server: dtls listen on %s: %v", *listen, err)

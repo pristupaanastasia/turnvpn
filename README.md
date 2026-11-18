@@ -41,7 +41,7 @@ Each tunnel datagram is a nest of layers; from outside in:
 
 ```
 ┌ TURN ChannelData — relay addressing; indistinguishable from WebRTC media ─────┐
-│ ┌ DTLS 1.2 record — AEAD (AES-128-GCM), ECDHE key exchange ─────────────────┐ │
+│ ┌ DTLS 1.2 record — AEAD ChaCha20-Poly1305, ECDHE-PSK (mutually authed) ─────┐ │
 │ │ ┌ KCP segment — reliable ARQ (no crypto; DTLS already encrypts) ────────┐ │ │
 │ │ │ ┌ smux frame — stream multiplexing ─────────────────────────────────┐ │ │ │
 │ │ │ │  "host:port" header + the proxied TCP stream                       │ │ │ │
@@ -54,41 +54,34 @@ Each tunnel datagram is a nest of layers; from outside in:
 
 **What DTLS gives us**
 
-- **Confidentiality + integrity** of the tunneled bytes. The cipher is
-  `ECDHE-ECDSA-AES128-GCM` — an AEAD, so every record is encrypted *and*
-  tamper-evident; ephemeral ECDHE gives **forward secrecy** (a later key
-  compromise doesn't decrypt past traffic). The relay, the ISP and anyone on the
-  path see only ciphertext.
+- **Mutual authentication (pre-shared key).** Both endpoints share a secret
+  (`-secret` / `TURNVPN_SECRET`) and the suite is **ECDHE-PSK**: the handshake
+  only completes if each side derives the same key, so an attacker without the
+  secret can neither pose as the VPS to the client (**no MITM**) nor use the VPS
+  as an open proxy. See `internal/authdtls`.
+- **Confidentiality + integrity** of the tunneled bytes. The suite is
+  `ECDHE-PSK-WITH-CHACHA20-POLY1305` — an AEAD, so every record is encrypted
+  *and* tamper-evident; the ephemeral ECDHE part gives **forward secrecy** (a
+  later secret compromise does not decrypt past traffic). The relay, the ISP and
+  anyone on the path see only ciphertext.
 - **Disguise.** DTLS is exactly what WebRTC media is wrapped in, so the relay
   forwards it; raw/un-wrapped bytes are silently dropped by the relay's data
   plane. The wrapper is what makes the whole approach work at all.
 - KCP deliberately uses **no** crypto (`NoneBlockCrypt`): DTLS already encrypts
   the datagram, so a second cipher would only waste CPU.
 
-**What DTLS here does *not* give — and why it's still safe**
+**Defense in depth.** The DTLS layer already authenticates both ends, but the
+payload is *also* independently protected by the application layer: browsing is
+HTTPS, so there is a second, authenticated TLS session end-to-end to the real
+website — the VPS and the relay only ever see that inner TLS ciphertext, never
+your plaintext. So your traffic is encrypted twice over the untrusted relay, and
+the only party that ever sees a cleartext destination is your own VPS.
 
-- **No endpoint authentication.** We use self-signed certs with
-  `InsecureSkipVerify`, so the DTLS layer confirms *encryption*, not *who* the
-  peer is. On its own that leaves it open to an active man-in-the-middle who can
-  impersonate the VPS. We accept this because:
-  - the party in the middle *is* the VK relay, which forwards blindly and has no
-    incentive to mount an active MITM; and
-  - **defense in depth**: the bytes inside are independently protected by the
-    application layer. Browsing is HTTPS, so there is a second, *authenticated*
-    TLS session end-to-end to the real website — the VPS and the relay only ever
-    see that inner TLS ciphertext, never your plaintext. If you run **WireGuard**
-    over the tunnel instead of a browser proxy, WireGuard adds its own
-    authenticated encryption with pinned public keys, closing the MITM gap
-    entirely.
-- **It hides content, not the tunnel's existence.** Payloads are encrypted, but
-  sustained high-volume traffic through a "call", and a TURN allocation that
-  egresses to an external IP, are detectable by traffic analysis. Encryption
-  protects *what* you send, not the *fact* that a tunnel is running. Reduce
-  footprint (bitrate shaping, endpoint rotation); do not expect invisibility.
-
-**Net:** your actual traffic is encrypted twice over an untrusted relay — once by
-DTLS (transport + disguise) and once by the app layer (HTTPS/WireGuard, which also
-authenticates the far end). The relay carries bytes it cannot read or usefully alter.
+**What it still does *not* hide: the tunnel's existence.** Payloads are encrypted
+and authenticated, but sustained high-volume traffic through a "call", and a TURN
+allocation that egresses to an external IP, are detectable by traffic analysis.
+Encryption protects *what* you send, not the *fact* that a tunnel is running.
+Reduce footprint (bitrate shaping, endpoint rotation); do not expect invisibility.
 
 ## Components
 
@@ -107,18 +100,21 @@ authenticates the far end). The relay carries bytes it cannot read or usefully a
 
 ## Usage
 
+Pick a shared secret and set it on **both** ends (`-secret` or `TURNVPN_SECRET`);
+it mutually authenticates the tunnel so the exit is not an open proxy.
+
 On the VPS (open the UDP port in the firewall):
 
 ```sh
 go build -o server ./cmd/server
-./server -listen 0.0.0.0:56000
+TURNVPN_SECRET='<shared secret>' ./server -listen 0.0.0.0:56000
 ```
 
 On your machine (with a per-call token captured from a browser call):
 
 ```sh
 go build -o client ./cmd/client
-TURN_CALL_TOKEN='<call-token>' ./client \
+TURNVPN_SECRET='<same shared secret>' TURN_CALL_TOKEN='<call-token>' ./client \
   -peer <VPS_IP>:56000 \
   -vk-link <token from vk.ru/call/join/...> \
   -tunnels 2
