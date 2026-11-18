@@ -46,16 +46,12 @@ TURN-серверы за звонками VK — в белом списке (о�
 Каждая датаграмма туннеля — вложенность слоёв, снаружи внутрь:
 
 ```
-┌ TURN ChannelData — адресация реле; неотличимо от WebRTC-медиа ─────────────────┐
-│ ┌ DTLS 1.2 record — AEAD ChaCha20-Poly1305, ECDHE-PSK (взаимная аутентификация)┐ │
-│ │ ┌ KCP segment — надёжный ARQ (без крипты; DTLS уже шифрует) ────────────┐ │ │
-│ │ │ ┌ smux frame — мультиплексирование потоков ─────────────────────────┐ │ │ │
-│ │ │ │  заголовок "host:port" + проксируемый TCP-поток                    │ │ │ │
-│ │ │ │  (обычно сам по себе TLS/HTTPS, end-to-end до реального сайта)      │ │ │ │
-│ │ │ └────────────────────────────────────────────────────────────────────┘ │ │ │
-│ │ └──────────────────────────────────────────────────────────────────────┘ │ │
-│ └────────────────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────────────┘
+TURN ChannelData          — адресация реле; неотличимо от WebRTC-медиа
+  └ DTLS 1.2 record       — AEAD ChaCha20-Poly1305, ECDHE-PSK (взаимная аутентификация)
+      └ KCP segment       — надёжный ARQ (без крипты; DTLS уже шифрует)
+          └ smux frame    — мультиплексирование потоков
+              └ полезная нагрузка: заголовок "host:port" + проксируемый TCP-поток
+                 (обычно сам по себе TLS/HTTPS, end-to-end до реального сайта)
 ```
 
 **Что даёт DTLS**
@@ -186,16 +182,12 @@ implement captcha solving.
 Each tunnel datagram is a nest of layers; from outside in:
 
 ```
-┌ TURN ChannelData — relay addressing; indistinguishable from WebRTC media ─────┐
-│ ┌ DTLS 1.2 record — AEAD ChaCha20-Poly1305, ECDHE-PSK (mutually authed) ─────┐ │
-│ │ ┌ KCP segment — reliable ARQ (no crypto; DTLS already encrypts) ────────┐ │ │
-│ │ │ ┌ smux frame — stream multiplexing ─────────────────────────────────┐ │ │ │
-│ │ │ │  "host:port" header + the proxied TCP stream                       │ │ │ │
-│ │ │ │  (usually itself TLS/HTTPS, end-to-end to the real site)           │ │ │ │
-│ │ │ └────────────────────────────────────────────────────────────────────┘ │ │ │
-│ │ └──────────────────────────────────────────────────────────────────────┘ │ │
-│ └────────────────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────────────┘
+TURN ChannelData          — relay addressing; indistinguishable from WebRTC media
+  └ DTLS 1.2 record       — AEAD ChaCha20-Poly1305, ECDHE-PSK (mutually authenticated)
+      └ KCP segment       — reliable ARQ (no crypto; DTLS already encrypts)
+          └ smux frame    — stream multiplexing
+              └ payload: "host:port" header + the proxied TCP stream
+                 (usually itself TLS/HTTPS, end-to-end to the real site)
 ```
 
 **What DTLS gives us**
