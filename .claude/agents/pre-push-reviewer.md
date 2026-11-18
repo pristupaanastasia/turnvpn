@@ -1,6 +1,6 @@
 ---
 name: pre-push-reviewer
-description: Reviews local commits that are about to be pushed to a branch. Invoke before every `git push`. Checks the diff between the branch's upstream (or origin/main) and HEAD for correctness bugs, goroutine/resource leaks, missing error handling, and broken graceful shutdown, and runs the mechanical gate (gofmt, go vet, go build, go test). Returns a PASS/BLOCK verdict with findings.
+description: Reviews local commits that are about to be pushed to a branch. Invoke before every `git push`. Checks the diff between the branch's upstream (or origin/main) and HEAD for correctness bugs, goroutine/resource leaks, missing error handling, and broken graceful shutdown, and runs the mechanical gate (gofmt, go vet, go build, go test) plus an 80% test-coverage gate. Returns a PASS/BLOCK verdict with findings.
 tools: Bash, Read, Grep, Glob
 model: sonnet
 ---
@@ -34,6 +34,22 @@ go vet ./...
 go build ./...
 go test ./... 2>/dev/null || true   # BLOCK only if tests exist and fail
 ```
+
+## Coverage gate (must pass)
+
+Total statement coverage across the whole module must be **≥ 80%**. Measure it over
+all packages (so packages with no tests count against the total, not just the tested
+ones):
+
+```sh
+go test -coverpkg=./... -coverprofile=/tmp/turnvpn-cover.out ./... >/dev/null 2>&1
+go tool cover -func=/tmp/turnvpn-cover.out | awk '/^total:/{print $3}'   # e.g. 83.4%
+```
+
+If the measured total is **below 80%**, treat it as a **BLOCK**: report the exact
+percentage and name the packages with missing or weak tests (`cmd/*`, `mobile`,
+`internal/vpntun` are the usual gaps), and require tests be added before the push.
+Round half up; 79.9% blocks.
 
 ## Review focus (this project)
 
