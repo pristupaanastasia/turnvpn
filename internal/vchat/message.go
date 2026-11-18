@@ -187,6 +187,17 @@ func Parse(raw []byte) (Message, error) {
 	return m, nil
 }
 
+// String renders the envelope only, never Raw or Data, so logging a Message with
+// %v/%+v cannot leak the ephemeral TURN credential the connection notification
+// carries in Raw.
+func (m Message) String() string {
+	if m.Kind == KindControl {
+		return fmt.Sprintf("vchat.Message{control:%q}", m.Control)
+	}
+	return fmt.Sprintf("vchat.Message{type:%q notification:%q response:%q seq:%d participant:%d}",
+		m.Type, m.Notification, m.Response, m.Sequence, m.ParticipantID)
+}
+
 // IsPing reports whether the message is a server heartbeat that must be answered
 // with Pong.
 func (m Message) IsPing() bool { return m.Kind == KindControl && m.Control == "ping" }

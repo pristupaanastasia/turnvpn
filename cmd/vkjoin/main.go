@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -203,16 +204,22 @@ func buildParams(login *okapi.AnonymLoginResult, desc *okapi.Descriptor, cfg con
 	return p, useWT, nil
 }
 
+// sensitiveField matches JSON fields whose values are secret (ephemeral TURN
+// credentials / tokens) in a signaling message, so they can be redacted in logs.
+var sensitiveField = regexp.MustCompile(`"(credential|username|token|secret)"\s*:\s*"[^"]*"`)
+
 // logMessage prints a captured signaling message for analysis. Payloads may carry
-// tokens/SDP crypto, so it prints the length and a bounded, quoted preview — %q
-// so control bytes or a truncated UTF-8 sequence cannot garble or inject the log.
+// TURN credentials, tokens and SDP crypto, so it redacts known secret fields,
+// then prints the length and a bounded, quoted preview — %q so control bytes or a
+// truncated UTF-8 sequence cannot garble or inject the log.
 func logMessage(msg []byte) {
 	const previewMax = 300
-	preview := msg
+	safe := sensitiveField.ReplaceAll(msg, []byte(`"$1":"<redacted>"`))
+	preview := safe
 	truncated := ""
 	if len(preview) > previewMax {
 		preview = preview[:previewMax]
-		truncated = fmt.Sprintf("…(+%dB)", len(msg)-previewMax)
+		truncated = fmt.Sprintf("…(+%dB)", len(safe)-previewMax)
 	}
 	log.Printf("SIGNAL [%dB] %q%s", len(msg), preview, truncated)
 }

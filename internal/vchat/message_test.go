@@ -2,6 +2,7 @@ package vchat
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -127,6 +128,20 @@ func TestParseConnection(t *testing.T) {
 	m2, _ := Parse([]byte(`{"type":"notification","notification":"transmitted-data"}`))
 	if m2.IsConnection() {
 		t.Error("transmitted-data misreported as connection")
+	}
+}
+
+func TestMessageStringNoRawLeak(t *testing.T) {
+	raw := []byte(`{"type":"notification","notification":"connection","conversationParams":{"turn":{"credential":"SECRET","username":"USER"}}}`)
+	m, _ := Parse(raw)
+	s := m.String()
+	for _, bad := range []string{"SECRET", "USER", "credential"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("String() leaked %q: %s", bad, s)
+		}
+	}
+	if !strings.Contains(s, "connection") {
+		t.Errorf("String() should name the notification: %s", s)
 	}
 }
 
