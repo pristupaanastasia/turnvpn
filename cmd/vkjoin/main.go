@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -25,6 +26,7 @@ import (
 	"github.com/pristupaanastasia/turnvpn/internal/graceful"
 	"github.com/pristupaanastasia/turnvpn/internal/okapi"
 	"github.com/pristupaanastasia/turnvpn/internal/vkapi"
+	"github.com/pristupaanastasia/turnvpn/internal/vkcall"
 	"github.com/pristupaanastasia/turnvpn/internal/wttransport"
 )
 
@@ -42,6 +44,7 @@ func main() {
 	clientVer := flag.String("client-version", "0.0.0", "client_version for anonymLogin")
 	entityType := flag.String("entity-type", "", "signaling entityType (from conversation params; may be required)")
 	video := flag.Bool("video", false, "request a video session")
+	webrtcMode := flag.Bool("webrtc", false, "actually join over WebRTC (answer the SFU) instead of only capturing signaling")
 	dur := flag.Duration("duration", 30*time.Second, "how long to listen for signaling messages")
 	flag.Parse()
 
@@ -65,7 +68,7 @@ func main() {
 
 	if err := run(r.Context(), config{
 		link: *link, token: tok, accessToken: accTok, autoToken: *autoToken, name: *name,
-		appKey: *appKey, deviceID: *deviceID,
+		appKey: *appKey, deviceID: *deviceID, webrtc: *webrtcMode,
 		clientVersion: *clientVer, entityType: *entityType, video: *video, duration: *dur,
 	}); err != nil {
 		log.Fatalf("vkjoin: %v", err)
@@ -75,7 +78,7 @@ func main() {
 type config struct {
 	link, token, accessToken, name              string
 	appKey, deviceID, clientVersion, entityType string
-	autoToken, video                            bool
+	autoToken, video, webrtc                    bool
 	duration                                    time.Duration
 }
 
@@ -122,8 +125,24 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("dial signaling: %w", err)
 	}
 	defer sess.Close()
-	log.Printf("signaling connected (compression=%d); listening %s", wttransport.CompressionFromURL(sigURL), cfg.duration)
+	log.Printf("signaling connected (compression=%d)", wttransport.CompressionFromURL(sigURL))
 
+	if cfg.webrtc {
+		// Actually join: answer the SFU, connect, and hold the call for -duration.
+		callCtx, cancel := context.WithTimeout(ctx, cfg.duration)
+		defer cancel()
+		res, err := vkcall.RunCall(callCtx, sess, log.Printf)
+		if res != nil && res.ConnectionInfo != nil {
+			log.Printf("call %s: connected=%v", res.ConnectionInfo.Conversation.ID, res.Connected)
+		}
+		// Reaching the duration (ctx deadline/cancel) is a normal end, not a failure.
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("join call: %w", err)
+		}
+		return nil
+	}
+
+	log.Printf("capturing signaling for %s", cfg.duration)
 	deadline := time.After(cfg.duration)
 	for {
 		select {
