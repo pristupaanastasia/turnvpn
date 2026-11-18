@@ -97,6 +97,49 @@ type Message struct {
 	ParticipantID   int64
 	ParticipantType string
 	Data            json.RawMessage // raw "data" (transmit payload, participant data, …)
+	Raw             json.RawMessage // the whole message, for fields beyond the envelope
+}
+
+// ICEConfig is a stun/turn entry of the connection notification.
+type ICEConfig struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// ConnectionInfo is the payload of the "connection" notification: the join
+// confirmation, including the ICE servers (ephemeral TURN credentials) and the
+// conversation identity needed to drive media.
+type ConnectionInfo struct {
+	Endpoint           string `json:"endpoint"`
+	ConversationParams struct {
+		ServerTime int64     `json:"serverTime"`
+		Stun       ICEConfig `json:"stun"`
+		Turn       ICEConfig `json:"turn"`
+	} `json:"conversationParams"`
+	Conversation struct {
+		ID       string `json:"id"`
+		JoinLink string `json:"joinLink"`
+		State    string `json:"state"`
+		Topology string `json:"topology"`
+	} `json:"conversation"`
+	PeerID struct {
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
+	} `json:"peerId"`
+}
+
+// Connection decodes the "connection" notification's full payload (STUN/TURN,
+// conversation, endpoint). ok is false for any other message.
+func (m Message) Connection() (*ConnectionInfo, bool) {
+	if !m.IsConnection() || len(m.Raw) == 0 {
+		return nil, false
+	}
+	var ci ConnectionInfo
+	if err := json.Unmarshal(m.Raw, &ci); err != nil {
+		return nil, false
+	}
+	return &ci, true
 }
 
 // Parse decodes one inbound message: the control strings "ping"/"pong", or a JSON
@@ -131,6 +174,7 @@ func Parse(raw []byte) (Message, error) {
 		ParticipantID:   env.ParticipantID,
 		ParticipantType: env.ParticipantType,
 		Data:            env.Data,
+		Raw:             append(json.RawMessage(nil), t...),
 	}
 	switch env.Type {
 	case "notification":
