@@ -84,6 +84,29 @@ func (d *Dialer) Dial(ctx context.Context, network, target string) (net.Conn, er
 	return stream, nil
 }
 
+// DialUDPStream opens a tunnel stream that relays UDP datagrams to target; the
+// caller frames each datagram with a uint16 length prefix (see mobile.udpConn) and
+// the server dials UDP and pipes them both ways.
+func (d *Dialer) DialUDPStream(target string) (net.Conn, error) {
+	sess, err := d.session()
+	if err != nil {
+		return nil, err
+	}
+	stream, err := tunnel.OpenUDP(sess, target)
+	if err != nil {
+		d.markDead(sess)
+		return nil, fmt.Errorf("vpntun: open udp stream to %s: %w", target, err)
+	}
+	return stream, nil
+}
+
+// Connect eagerly establishes the tunnel (creds, relay, PSK-DTLS, mux) so that
+// setup failures surface immediately instead of on the first Dial.
+func (d *Dialer) Connect() error {
+	_, err := d.session()
+	return err
+}
+
 // session returns a live session, establishing or re-establishing as needed.
 func (d *Dialer) session() (*smux.Session, error) {
 	d.mu.Lock()

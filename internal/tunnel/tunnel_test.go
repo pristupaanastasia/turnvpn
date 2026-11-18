@@ -3,6 +3,7 @@ package tunnel_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -199,6 +200,77 @@ func TestConcurrentStreams(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// udpEchoOrigin starts a UDP server that echoes each datagram back — the UDP peer
+// the client reaches through the relay. Returns its address and a stop func.
+func udpEchoOrigin(t *testing.T) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = pc.WriteTo(buf[:n], addr)
+		}
+	}()
+	return pc.LocalAddr().String(), func() { _ = pc.Close() }
+}
+
+// TestUDPRelay: datagrams framed over a tunnel stream reach a UDP peer and echo
+// back, proving OpenUDP -> handleUDP -> UDP dial -> relay both ways (Stage 7).
+func TestUDPRelay(t *testing.T) {
+	origin, stop := udpEchoOrigin(t)
+	defer stop()
+
+	sess := buildTunnel(t, testSecret, testSecret)
+	if sess == nil {
+		t.Fatal("tunnel did not establish")
+	}
+
+	stream, err := tunnel.OpenUDP(sess, origin)
+	if err != nil {
+		t.Fatalf("open udp: %v", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	send := func(payload []byte) {
+		var lb [2]byte
+		binary.BigEndian.PutUint16(lb[:], uint16(len(payload)))
+		if _, err := stream.Write(append(lb[:], payload...)); err != nil {
+			t.Fatalf("write datagram: %v", err)
+		}
+	}
+	recv := func() []byte {
+		_ = stream.SetReadDeadline(time.Now().Add(10 * time.Second))
+		var lb [2]byte
+		if _, err := io.ReadFull(stream, lb[:]); err != nil {
+			t.Fatalf("read datagram len: %v", err)
+		}
+		b := make([]byte, int(binary.BigEndian.Uint16(lb[:])))
+		if _, err := io.ReadFull(stream, b); err != nil {
+			t.Fatalf("read datagram: %v", err)
+		}
+		return b
+	}
+
+	// Several datagrams over one association, including a larger one.
+	for _, msg := range [][]byte{
+		[]byte("udp-datagram-one"),
+		[]byte("second"),
+		bytes.Repeat([]byte("x"), 1200),
+	} {
+		send(msg)
+		if got := recv(); !bytes.Equal(got, msg) {
+			t.Fatalf("udp echo = %q, want %q", got, msg)
+		}
 	}
 }
 

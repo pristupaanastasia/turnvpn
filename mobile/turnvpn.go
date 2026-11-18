@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/xjasonlyu/tun2socks/v2/engine"
 	M "github.com/xjasonlyu/tun2socks/v2/metadata"
@@ -22,9 +23,6 @@ import (
 
 	"github.com/pristupaanastasia/turnvpn/internal/vpntun"
 )
-
-// errUDPUnsupported is returned for UDP flows: the tunnel is TCP only.
-var errUDPUnsupported = errors.New("turnvpn: UDP not supported; enable Private DNS (DoT) on the device")
 
 var state struct {
 	mu      sync.Mutex
@@ -52,7 +50,24 @@ func (tunProxy) DialContext(ctx context.Context, m *M.Metadata) (net.Conn, error
 	return d.Dial(ctx, "tcp", m.DestinationAddrPort().String())
 }
 
-func (tunProxy) DialUDP(*M.Metadata) (net.PacketConn, error) { return nil, errUDPUnsupported }
+func (tunProxy) DialUDP(m *M.Metadata) (net.PacketConn, error) {
+	state.mu.Lock()
+	d := state.dialer
+	state.mu.Unlock()
+	if d == nil {
+		return nil, errors.New("turnvpn: not started")
+	}
+	// DNS stays on the DNS-over-TCP shim (works even with servers predating the
+	// UDP relay); other UDP (QUIC, etc.) is relayed as framed datagrams.
+	if m.DstPort == 53 {
+		return newDNSPacketConn(d, m), nil
+	}
+	stream, err := d.DialUDPStream(m.DestinationAddress())
+	if err != nil {
+		return nil, err
+	}
+	return newUDPConn(stream, m.UDPAddr()), nil
+}
 
 // Start brings up the VPN: it builds the tunnel (credentials from the VK call token)
 // and starts a tun2socks engine on tunFd routing the device's traffic through it.
@@ -81,6 +96,23 @@ func Start(tunFd int, mtu int, peer, secret, vkLink, token, appKey string) error
 		return err
 	}
 	state.dialer = d
+
+	// Bring the tunnel up now so credential/TURN/DTLS failures surface here
+	// (the UI shows "connected" only once this succeeds), bounded by a timeout.
+	errc := make(chan error, 1)
+	go func() { errc <- d.Connect() }()
+	select {
+	case err := <-errc:
+		if err != nil {
+			_ = d.Close()
+			state.dialer = nil
+			return err
+		}
+	case <-time.After(25 * time.Second):
+		_ = d.Close()
+		state.dialer = nil
+		return errors.New("turnvpn: connect timed out")
+	}
 
 	engine.Insert(&engine.Key{
 		MTU:      mtu,
