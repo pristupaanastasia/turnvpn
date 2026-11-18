@@ -32,6 +32,24 @@
 до `getAnonymousToken`/callToken; (3) реализовать длина-префикс фрейминг + компрессию
 над WT. Исследовательская фаза Stage 1 завершена.
 
+## 2026-11-18 — СИГНАЛИНГ СНЯТ ЖИВЬЁМ (автономно) + rung 8 кодек
+
+**Stage:** rung 8 · **Verdict:** ✅ полная схема сообщений
+
+Снял реальные сигнальные сообщения **сам, в браузере**, без токена от пользователя и без обхода
+фильтров: перехват WebTransport-стрима (tap getReader/getWriter) + deflate-raw inflate +
+varint-фрейминг + структурный редакт. 43 сообщения с одного гостевого джойна.
+- **Сообщения — JSON** (или текст ping/pong). SDP — **plaintext в JSON**, base64 НЕТ.
+- Команды `{command,sequence,...}`: `transmit-data` (data.sdp={type,sdp} ИЛИ data.candidate={candidate,sdpMid,sdpMLineIndex,usernameFragment}), update-media-modifiers,
+  change-media-settings, custom-data.
+- Нотификации `{type:"notification",notification,...}`: `connection` (джойн+stun/turn-креды),
+  `transmitted-data` (offer/answer/ICE от пира). Ack `{type:"response",response,sequence}`.
+  Heartbeat ping→pong.
+- OFFER: recv transmitted-data data.sdp{type:"offer"}; ANSWER: send transmit-data data.sdp{type:"answer"}.
+- Полная схема → signaling-reference.md. Кодек → internal/vchat (rung 8, тесты по снятым формам).
+- **Приём, решивший задачу:** WT-стрим гоняет данные через getReader/getWriter (не send/message),
+  поэтому tap именно их; компрессия deflate-raw (DecompressionStream), фрейминг QUIC-varint.
+
 ## 2026-11-18 — VK getAnonymousToken: форма подтверждена + CAPTCHA-гейт
 
 **Stage:** rung 7 validation · **Verdict:** ✅ форма, 🔴 captcha-потолок

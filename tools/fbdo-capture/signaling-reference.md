@@ -189,6 +189,34 @@ session_data = { device_id:<uuid>, client_version:<apiClientVersion>,
 `token`) — `userId` = `uid` из `anonymLogin`/join-ответа; `entityType`/
 `conversationId` — из параметров разговора. Развести при dial (rung 5).
 
+### Схема сообщений ws2/WebTransport (СНЯТА ЖИВЬЁМ 2026-11-18)
+
+Снято перехватом WebTransport-стрима в странице (tap getReader/getWriter +
+deflate-raw inflate + varint-фрейминг). Сообщения — **JSON-строки** (или текст
+`ping`/`pong`). SDP — **plaintext в JSON**, без base64.
+
+**Клиент → сервер (команды):** `{ "command": <name>, "sequence": <n>, ... }`
+- `transmit-data` — несёт WebRTC-примитив в `data` (союз):
+  - offer/answer: `data = { "sdp": { "type": "offer"|"answer", "sdp": "<SDP>" }, "animojiVersion": <n> }`
+  - ICE: `data = { "candidate": { "candidate": "<cand>", "sdpMid": "0", "sdpMLineIndex": <n>, "usernameFragment": "<ufrag>" } }`
+  - плюс `participantId`, `participantType: "USER"`.
+- `update-media-modifiers` — `{ mediaModifiers }`.
+- `change-media-settings` — `{ mediaSettings: { isAudioEnabled, isVideoEnabled, isScreenSharingEnabled, isAnimojiEnabled, … } }`.
+- `custom-data` — `{ data: { sdk: { type:"bad-net", rtt, loss } }, participantId }` (стат-сигналы).
+
+**Сервер → клиент (нотификации):** `{ "type": "notification", "notification": <name>, "stamp": <n>, "peerId": {id, type:"WEB_TRANSPORT"}, ... }`
+- `connection` — джойн подтверждён: `conversation { id, joinLink, participants[], state:"ACTIVE", topology:"DIRECT", features, options }` + `conversationParams { serverTime, stun{urls}, turn{urls, username:"<ts>:<id>", credential} }` (TURN-креды здесь, эфемерные).
+- `transmitted-data` — SDP/ICE **от пира/SFU**: тот же `data`-союз (`sdp` offer/answer, или `candidate`), `participantId`, `participantType`.
+- прочие: участники/медиа/роли.
+
+**Ack:** `{ "type": "response", "response": <commandName>, "sequence": <n>, "stamp": <n> }` — по `sequence`.
+**Heartbeat:** текст `ping` → ответ `pong` (6 байт).
+
+→ pion-сигналинг: принять `connection` → дождаться `transmitted-data` с
+`data.sdp` offer → отправить `transmit-data` c `data.sdp` answer (+ `sequence`,
+`participantId`, `participantType:"USER"`) → трикл ICE через `transmit-data`
+`data.candidate` ↔ `transmitted-data`; отвечать `pong` на `ping`.
+
 ### Итог: что ещё реально нужно для pion
 
 Архитектура снята полностью. Для рабочего клиента осталось (всё из статики/кода,
