@@ -40,7 +40,15 @@ type PeerFactory func(webrtc.Configuration) (*webrtc.PeerConnection, error)
 // the caller adds its tracks/transceivers to the returned PeerConnection and then
 // calls Answerer.Run to drive the offer/answer/ICE handshake. The caller owns and
 // closes the PeerConnection, the Answerer, the signaling Conn and the transport.
+//
+// Keep the window between Join returning and Answerer.Run short: until Run starts,
+// inbound events fill vchat.Conn's bounded Events buffer, and once it is full the
+// read loop can no longer answer heartbeat pings, which may make the SFU drop the
+// session. Add tracks quickly, then call Run (e.g. in a goroutine).
 func Join(ctx context.Context, sig *vchat.Conn, newPeer PeerFactory) (*webrtc.PeerConnection, *Answerer, *vchat.ConnectionInfo, error) {
+	if sig == nil || newPeer == nil {
+		return nil, nil, nil, errors.New("vkcall: Join needs a non-nil signaling conn and peer factory")
+	}
 	ci, err := awaitConnection(ctx, sig.Events())
 	if err != nil {
 		return nil, nil, nil, err
@@ -48,6 +56,9 @@ func Join(ctx context.Context, sig *vchat.Conn, newPeer PeerFactory) (*webrtc.Pe
 	pc, err := newPeer(Configuration(ci))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("vkcall: create peer: %w", err)
+	}
+	if pc == nil {
+		return nil, nil, nil, errors.New("vkcall: peer factory returned a nil PeerConnection")
 	}
 	return pc, NewAnswerer(sig, pc), ci, nil
 }

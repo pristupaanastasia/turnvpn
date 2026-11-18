@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"github.com/pristupaanastasia/turnvpn/internal/vchat"
 )
 
@@ -44,6 +46,12 @@ func TestAwaitConnectionStreamEnds(t *testing.T) {
 	close(ev)
 	if _, err := awaitConnection(context.Background(), ev); err == nil {
 		t.Error("expected error when stream ends before connection")
+	}
+}
+
+func TestJoinNilGuards(t *testing.T) {
+	if _, _, _, err := Join(context.Background(), nil, func(c webrtc.Configuration) (*webrtc.PeerConnection, error) { return nil, nil }); err == nil {
+		t.Error("expected error for nil signaling conn")
 	}
 }
 
