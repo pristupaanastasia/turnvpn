@@ -20,6 +20,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".CaptchaActivity"
+            android:exported="false"
+            android:label="Solve captcha / join call" />
+
         <service
             android:name=".TurnvpnService"
             android:exported="false"

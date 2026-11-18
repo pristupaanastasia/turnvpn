@@ -42,8 +42,15 @@
             android:id="@+id/token"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="call token (captured in browser, past captcha)"
+            android:hint="call token (filled by Get token, or paste manually)"
             android:inputType="text" />
+
+        <Button
+            android:id="@+id/getToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Get token (open call, solve captcha)" />
 
         <Button
             android:id="@+id/connect"

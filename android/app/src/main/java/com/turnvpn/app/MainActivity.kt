@@ -7,6 +7,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 
@@ -22,6 +23,18 @@ class MainActivity : AppCompatActivity() {
         if (res.resultCode == Activity.RESULT_OK) startVpn()
     }
 
+    // Captcha/join WebView; on success it returns the captured per-call token.
+    private val capture = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val t = res.data?.getStringExtra(CaptchaActivity.EXTRA_TOKEN).orEmpty()
+            if (t.isNotBlank()) {
+                token.setText(t)
+                savePrefs()
+                Toast.makeText(this, "Token captured", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -32,6 +45,15 @@ class MainActivity : AppCompatActivity() {
         token = findViewById(R.id.token)
         loadPrefs()
 
+        findViewById<Button>(R.id.getToken).setOnClickListener {
+            savePrefs()
+            val l = link.text.toString().trim()
+            if (l.isEmpty()) {
+                Toast.makeText(this, "Enter the VK call link first", Toast.LENGTH_LONG).show()
+            } else {
+                capture.launch(Intent(this, CaptchaActivity::class.java).putExtra(CaptchaActivity.EXTRA_LINK, l))
+            }
+        }
         findViewById<Button>(R.id.connect).setOnClickListener {
             savePrefs()
             val prep = VpnService.prepare(this)
