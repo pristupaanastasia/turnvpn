@@ -120,17 +120,26 @@ type AnonymLoginResult struct {
 	APIServer        string `json:"api_server"`
 }
 
-// AnonymLogin performs auth.anonymLogin with the per-call guest token and returns
-// the OK session. On success it stores SessionKey (and APIServer, if returned) on
-// the client for subsequent calls. callToken is the VK-issued guest call token;
-// deviceID is a stable per-device UUID; clientVersion identifies the client build.
-func (c *Client) AnonymLogin(ctx context.Context, callToken, deviceID, clientVersion string) (*AnonymLoginResult, error) {
+// AnonymLogin performs auth.anonymLogin and returns the OK session. On success it
+// stores SessionKey (and APIServer, if returned) on the client for subsequent
+// calls. deviceID is a stable per-device UUID; clientVersion identifies the client
+// build.
+//
+// authToken is the VK anonymous ACCESS token (the "anonym.<jwt>" from
+// GetAnonymToken / the login service), NOT the per-call guest token. This is the
+// identity token the web client wires as ry.authToken and sends as the anonymLogin
+// auth_token (engine oX → ok.authorize); the per-call token (a.token / ry.anonymToken)
+// is a separate value used only as joinConversationByLink's anonymToken. Sending the
+// call token here fails with "AUTH_LOGIN : Access token is broken". The anonymLogin
+// identity (this JWT's anonym_id) must match the identity the join's anonymToken was
+// minted for, so both must come from the same anonymous session.
+func (c *Client) AnonymLogin(ctx context.Context, authToken, deviceID, clientVersion string) (*AnonymLoginResult, error) {
 	data, err := c.call(ctx, "auth.anonymLogin", Params{
 		"session_data": map[string]any{
 			"device_id":      deviceID,
 			"client_version": clientVersion,
 			"client_type":    WebClientType,
-			"auth_token":     callToken,
+			"auth_token":     authToken,
 			"version":        3,
 		},
 	}, true)

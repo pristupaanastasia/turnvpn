@@ -15,3 +15,4 @@ cap.json
 secrets/
 *.creds.env
 vk-creds*.env
+/vkjoin

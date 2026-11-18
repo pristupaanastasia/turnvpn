@@ -10,8 +10,11 @@
 //     id/secret. EXPERIMENTAL — the exact login request shape lives in a VK login
 //     module not yet captured; verify against a real get_anonym_token call.
 //  2. GetCallToken: call calls.getAnonymousToken(vk_join_link, name) on the VK API
-//     with that access token to get the per-call guest token. This token feeds
-//     okapi (auth.anonymLogin auth_token and joinConversationByLink anonymToken).
+//     with that access token to get the per-call guest token (a.token). This token
+//     is the join's anonymToken only (joinConversationByLink). anonymLogin's
+//     auth_token is the access token (JWT) from step 1, NOT this call token — the two
+//     are distinct, and the call token is rejected by anonymLogin ("Access token is
+//     broken"). Both must belong to the same anonymous identity.
 //
 // GetCallToken rests on the standard, public VK API request form plus the
 // chunk-confirmed parameter names, so it is the grounded, tested part.

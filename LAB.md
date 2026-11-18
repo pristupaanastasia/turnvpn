@@ -6,6 +6,35 @@
 
 ---
 
+## 2026-11-18 — Токенов ДВА, не один: anonymLogin ≠ join (баг клиента исправлен)
+
+**Stage:** rung 14 (нативный join) · **Verdict:** 🔶 найден и исправлен баг модели токенов; живая валидация ещё впереди
+
+- **Tried:** запустил `vkjoin -token <a.token> -webrtc` против живого звонка с
+  call-token'ом (32-hex), снятым из браузера. Клиент использовал один и тот же токен
+  и для `auth.anonymLogin` (auth_token), и для join (anonymToken).
+- **Result:** `anonymLogin` вернул **401 `AUTH_LOGIN : Access token is broken`**.
+  Разбор чанка `60828.js`/`webCallsBridge.js` показал: в веб-клиенте это **два
+  разных параметра** — `ry.authToken` и `ry.anonymToken`:
+  - `createParams()` в бридже кладёт **только** `anonymToken: t.getToken()` (= `a.token`,
+    per-call, 32-hex) — `authToken` там НЕ задаётся.
+  - `ry.authToken` ставится отдельно: `oX(e){ ry.authToken=e; … ok.authorize() }`, а
+    `authorize()` шлёт `auth.anonymLogin` с `auth_token: this._callToken`.
+  - `authData.token` (то, что идёт в `getAnonymousToken` как `accessToken` и парсится
+    на `anonym_id_long`) — это VK **anon access-token** `anonym.<JWT>`.
+- **Evidence:** статический разбор (grep по чанкам) + живой 401 на 32-hex в auth_token.
+- **Conclusion:** `anonymLogin.auth_token` = **anon access-token (JWT)**, а не call-token.
+  Call-token (`a.token`) — это **только** `anonymToken` джойна. Оба принадлежат одной
+  анонимной identity (call-token выпущен под `anonym_id` из JWT), поэтому их нужно
+  брать из **одной** браузерной сессии; подмешать самодобытый JWT к чужому call-token'у
+  нельзя.
+- **Fix:** `okapi.AnonymLogin` теперь принимает `authToken` (JWT); `vkjoin`
+  `resolveTokens()` разделил их: `-access-token`/`-auto-token` → JWT для login,
+  `-token` → call-token для join. Сборка/тесты зелёные.
+- **Next:** снять из браузера **пару** (JWT + call-token) одной сессии и прогнать
+  `vkjoin -access-token <jwt> -token <a.token> -webrtc` до `connected`. Капча сейчас
+  прогрета ре-джойнами — подождать остывания IP.
+
 ## 2026-11-17 — Stage 1 ЗАКРЫТ: wire-формат снят из статики чанка 60828.js
 
 **Stage:** 1d · **Verdict:** ✅ архитектура сигналинга реверснута полностью (без браузера)

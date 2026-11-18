@@ -5,10 +5,13 @@
 // tool for the next reverse step — understanding the signaling message schema —
 // the same capture→understand method used for the REST layer.
 //
-// It needs a live guest call token (the VK calls.getAnonymousToken flow is not
-// yet reproduced, so pass one captured from a browser session via -token or the
-// VKJOIN_TOKEN env var). The CLI never prints its own tokens; captured signaling
-// message content is logged quoted and length-bounded but is not itself redacted.
+// A guest join needs TWO tokens from the same anonymous browser session: the
+// anonymous access token (JWT) for auth.anonymLogin (-access-token / -auto-token),
+// and the per-call token (a.token) for the join's anonymToken (-token). They are
+// distinct: calls.getAnonymousToken (which mints the per-call token) is captcha-gated
+// for headless clients, so pass a browser-captured -token. The CLI never prints its
+// own tokens; captured signaling message content is logged quoted and length-bounded
+// but is not itself redacted.
 package main
 
 import (
@@ -35,9 +38,9 @@ const httpTimeout = 30 * time.Second
 
 func main() {
 	link := flag.String("link", "", "join link token from vk.ru/call/join/<token> (required)")
-	token := flag.String("token", "", "VK guest call token; takes precedence, else -access-token, else -auto-token")
-	accessToken := flag.String("access-token", "", "VK anonymous access token; with -link derives the call token (or env VKJOIN_ACCESS_TOKEN)")
-	autoToken := flag.Bool("auto-token", false, "obtain the anonymous access token automatically (experimental get_anonym_token)")
+	token := flag.String("token", "", "VK per-call guest token (a.token) for the join's anonymToken; capture from the browser (or env VKJOIN_TOKEN). If empty it is derived from the access token (captcha-gated)")
+	accessToken := flag.String("access-token", "", "VK anonymous access token (JWT, anonym.…) for anonymLogin; required unless -auto-token (or env VKJOIN_ACCESS_TOKEN). Must be from the same browser session as -token")
+	autoToken := flag.Bool("auto-token", false, "fetch the anonymous access token (JWT) automatically via get_anonym_token (captcha-free)")
 	name := flag.String("name", "probe", "guest display name")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
 	deviceID := flag.String("device-id", "turnvpn-vkjoin", "stable device id for anonymLogin")
@@ -56,9 +59,12 @@ func main() {
 	if accTok == "" {
 		accTok = os.Getenv("VKJOIN_ACCESS_TOKEN")
 	}
-	if *link == "" || (tok == "" && accTok == "" && !*autoToken) {
-		fmt.Fprintln(os.Stderr, "usage: vkjoin -link <token> [-token <call-token> | -access-token <vk-token> | -auto-token] [flags]")
-		fmt.Fprintln(os.Stderr, "       tokens may also come from VKJOIN_TOKEN / VKJOIN_ACCESS_TOKEN env vars")
+	// anonymLogin always needs the access JWT; the call token is optional (it can be
+	// derived, though that path is captcha-gated).
+	if *link == "" || (accTok == "" && !*autoToken) {
+		fmt.Fprintln(os.Stderr, "usage: vkjoin -link <token> (-access-token <jwt> | -auto-token) [-token <call-token>] [flags]")
+		fmt.Fprintln(os.Stderr, "       anonymLogin needs the anonymous access token (JWT); the join needs the per-call token (-token).")
+		fmt.Fprintln(os.Stderr, "       capture both from the same browser session; tokens may also come from VKJOIN_TOKEN / VKJOIN_ACCESS_TOKEN.")
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -83,14 +89,16 @@ type config struct {
 }
 
 func run(ctx context.Context, cfg config) error {
-	callToken, err := resolveCallToken(ctx, cfg)
+	authToken, callToken, err := resolveTokens(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
 	cl := &okapi.Client{AppKey: cfg.appKey, HTTP: &http.Client{Timeout: httpTimeout}}
 
-	login, err := cl.AnonymLogin(ctx, callToken, cfg.deviceID, cfg.clientVersion)
+	// anonymLogin authenticates the anonymous identity with the access JWT; the
+	// per-call token is NOT accepted here (it is only the join's anonymToken).
+	login, err := cl.AnonymLogin(ctx, authToken, cfg.deviceID, cfg.clientVersion)
 	if err != nil {
 		return fmt.Errorf("anonymLogin: %w", err)
 	}
@@ -168,34 +176,59 @@ func run(ctx context.Context, cfg config) error {
 	}
 }
 
-// resolveCallToken returns the per-call guest token: the explicit -token if set,
-// otherwise derived from a VK anonymous access token (explicit, env, or, with
-// -auto-token, fetched via the experimental get_anonym_token).
-func resolveCallToken(ctx context.Context, cfg config) (string, error) {
-	if cfg.token != "" {
-		return cfg.token, nil
-	}
+// resolveTokens returns the two distinct tokens a guest join needs:
+//
+//   - authToken: the VK anonymous ACCESS token (JWT, "anonym.<...>"), used as the
+//     auth.anonymLogin auth_token. From -access-token/env, or, with -auto-token,
+//     fetched via get_anonym_token (captcha-free).
+//   - callToken: the per-call guest token (a.token), used as joinConversationByLink's
+//     anonymToken. From -token/env, or derived from the access token via
+//     calls.getAnonymousToken (which is captcha-gated for headless clients, so the
+//     human-in-the-loop path is to paste a browser-captured -token instead).
+//
+// The two must belong to the SAME anonymous identity: the call token is minted for
+// the anonym_id inside the access JWT, and anonymLogin must present that same JWT, so
+// a self-fetched JWT cannot be mixed with a browser-captured call token.
+func resolveTokens(ctx context.Context, cfg config) (authToken, callToken string, err error) {
 	vk := &vkapi.Client{HTTP: &http.Client{Timeout: httpTimeout}}
-	access := cfg.accessToken
-	if access == "" {
-		if !cfg.autoToken {
-			return "", fmt.Errorf("no call token: pass -token, -access-token, or -auto-token")
+
+	authToken = cfg.accessToken
+	// A self-fetched JWT (-auto-token) has a different anonym_id than a
+	// browser-captured -token, so the join will be rejected. Warn loudly.
+	if cfg.autoToken && cfg.accessToken == "" && cfg.token != "" {
+		log.Printf("warning: -auto-token fetches a NEW anonymous identity but -token is from another session; the join will likely be rejected. Pass -access-token captured alongside -token instead")
+	}
+	if authToken == "" && cfg.autoToken {
+		a, aerr := vk.GetAnonymToken(ctx)
+		if aerr != nil {
+			return "", "", fmt.Errorf("get anonymous access token: %w", aerr)
 		}
-		a, err := vk.GetAnonymToken(ctx)
-		if err != nil {
-			return "", fmt.Errorf("get anonymous access token: %w", err)
-		}
-		access = a
+		authToken = a
 		log.Printf("obtained anonymous access token")
 	}
-	// Retry politely on transient flood control; a captcha returns immediately
-	// (it must be solved by a human in a browser, never retried away).
-	tok, err := vk.GetCallTokenRetry(ctx, access, cfg.link, cfg.name, vkapi.DefaultRetryPolicy)
-	if err != nil {
-		return "", fmt.Errorf("get call token: %w", err)
+
+	callToken = cfg.token
+	if callToken == "" {
+		// Derive it from the access token (captcha-gated). Needs the access JWT.
+		if authToken == "" {
+			return "", "", fmt.Errorf("no call token: pass -token, or -access-token/-auto-token to derive one")
+		}
+		// Retry politely on transient flood control; a captcha returns immediately
+		// (it must be solved by a human in a browser, never retried away).
+		tok, terr := vk.GetCallTokenRetry(ctx, authToken, cfg.link, cfg.name, vkapi.DefaultRetryPolicy)
+		if terr != nil {
+			return "", "", fmt.Errorf("get call token: %w", terr)
+		}
+		callToken = tok
+		log.Printf("derived call token from access token")
 	}
-	log.Printf("derived call token from access token")
-	return tok, nil
+
+	// anonymLogin needs the access JWT; the call token alone will not authenticate
+	// ("Access token is broken"). Require the JWT explicitly.
+	if authToken == "" {
+		return "", "", fmt.Errorf("anonymLogin needs the anonymous access token (JWT): pass -access-token (captured from the browser alongside -token) or -auto-token")
+	}
+	return authToken, callToken, nil
 }
 
 // buildParams maps the login + descriptor onto the signaling URL parameters, and
