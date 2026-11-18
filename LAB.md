@@ -6,6 +6,33 @@
 
 ---
 
+## 2026-11-19 — Hardening-2: per-client auth, Keystore, ротация, footprint-шейп, десктопный UDP
+
+**Stage:** Hardening (P0.3/P0.4/P2.2/P2.3 + Stage 7 десктоп) · **Verdict:** ✅ сделано,
+`go test ./... -race` зелёный, аудит чистый, выкачено на VPS
+
+- **P0.3 per-client auth:** `internal/authdtls` — `Keyring` (identity→secret) и
+  `Keyring.PSK()`; сервер `-keyring`/`TURNVPN_KEYRING` (файл `identity secret` на
+  строку), клиент `-identity`. Отзыв клиента = удалить строку и перезапустить.
+  Тесты `keyring_test.go`, `handshake_test.go` (неизвестная identity не проходит DTLS).
+- **P0.4 Keystore:** Android хранит секрет/токен в
+  `EncryptedSharedPreferences` (мастер-ключ в Android Keystore); `allowBackup=false`.
+- **P2.2 ротация выходов:** `cmd/client -peer` принимает список через запятую;
+  туннели раскладываются по эндпоинтам round-robin при каждом establish.
+- **P2.3 footprint-шейп:** `internal/mux/shaper.go` — token-bucket пейсит эмиссию
+  DTLS под битрейт-кап (`-shape 2mbit`), чтобы бёрсты выглядели ровнее, «как звонок».
+  Тесты `shaper_test.go` (пейсинг + `ParseBitrate`).
+- **Десктопный SOCKS5 UDP ASSOCIATE:** `cmd/client` теперь отдаёт UDP (QUIC/DNS)
+  не только через mobile/tun2socks, но и как обычный SOCKS5 UDP ASSOCIATE
+  (`serveUDPAssociate`, `internal/tunnel/udpflow.go`, `internal/socks` UDP-кодек).
+- **Evidence:** `go test ./... -race` PASS, `gofmt`/`go vet` чисто; security-audit
+  (скилл) — утечек секрета/IP/токена нет, SSRF закрыт, выход не open-proxy.
+- **Conclusion:** закрыт весь P0/P1.1/P2.2/P2.3 роудмапа. Остаток — research:
+  бенч KCP под потерями (P1.2/1.3), снижение частоты капчи (P2.1), headless-держатель
+  звонка (P2.4).
+- **Next:** протянуть per-client identity в mobile `Start()` + UI Android;
+  idle cover-traffic для шейпа.
+
 ## 2026-11-18 — Hardening: SSRF-guard, non-root сервер, ненадёжная дорожка для QUIC
 
 **Stage:** Hardening (P0.1/P0.2/P1.1) · **Verdict:** ✅ сделано, проверено вживую

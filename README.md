@@ -55,10 +55,12 @@ TURN ChannelData          — адресация реле; неотличимо 
 
 **Что даёт DTLS**
 
-- **Взаимная аутентификация (общий ключ).** Обе стороны знают секрет
-  (`-secret` / `TURNVPN_SECRET`), cipher — **ECDHE-PSK**: хендшейк проходит,
-  только если обе стороны вывели один ключ. Поэтому чужой без секрета не прикинется
-  VPS'ом для клиента (**нет MITM**) и не использует VPS как открытый прокси.
+- **Взаимная аутентификация.** Обе стороны знают секрет (`-secret` /
+  `TURNVPN_SECRET`), cipher — **ECDHE-PSK**: хендшейк проходит, только если обе
+  стороны вывели один ключ. Поэтому чужой без секрета не прикинется VPS'ом для
+  клиента (**нет MITM**) и не использует VPS как открытый прокси. Вместо единого
+  секрета сервер может принять **keyring** per-client идентичностей (`-keyring` +
+  `-identity` у клиента): у каждого клиента свой ключ, отзыв — удалением строки.
   См. `internal/authdtls`.
 - **Конфиденциальность + целостность** переданных байт. Cipher
   `ECDHE-PSK-WITH-CHACHA20-POLY1305` — AEAD: каждая запись зашифрована и защищена
@@ -77,23 +79,35 @@ TURN ChannelData          — адресация реле; неотличимо 
 **дважды** поверх недоверенного реле, а адрес назначения в открытую виден только
 собственному VPS.
 
+**Выход — не открытый релей наружу (SSRF-guard).** Цель потока диктует клиент, но
+сервер отклоняет loopback, приватные, link-local и metadata-адреса
+(`169.254.169.254`) и диалит по уже проверенному IP — чтобы туннель нельзя было
+навести на внутренние сервисы VPS или облачную метадату (и чтобы DNS-rebinding не
+проскочил между проверкой и диалом). См. `internal/tunnel`.
+
 **Чего это всё равно НЕ скрывает: сам факт туннеля.** Payload зашифрован и
 аутентифицирован, но устойчиво тяжёлый трафик через «звонок» и TURN-аллокация с
 egress'ом на внешний IP палятся трафик-анализом. Шифрование защищает *что* передаётся,
-а не *факт* работы туннеля. Footprint стоит снижать (шейп битрейта, ротация
-эндпоинтов); на невидимость рассчитывать не стоит.
+а не *факт* работы туннеля. Footprint можно снижать — шейп битрейта (`-shape`) и
+ротация выходов (`-peer` списком) уже есть, — но на невидимость рассчитывать не стоит.
 
 ## Компоненты
 
-- `cmd/client` — локальный SOCKS5-прокси; держит пул туннелей, каждый
-  `smux → KCP → DTLS` поверх `pion/turn`-аллокации. Фоновый менеджер обновляет креды
-  каждого туннеля до их протухания.
-- `cmd/server` — на VPS: терминирует DTLS, демультиплексирует потоки, набирает цель
-  каждого потока в открытом интернете и качает обратно.
+- `cmd/client` — локальный SOCKS5-прокси (CONNECT + UDP ASSOCIATE); держит пул
+  туннелей, каждый `smux → KCP → DTLS` поверх `pion/turn`-аллокации. Фоновый менеджер
+  обновляет креды каждого туннеля до их протухания. `-peer` через запятую раскладывает
+  туннели по нескольким выходам (ротация).
+- `cmd/server` — на VPS: терминирует DTLS, демультиплексирует потоки, фильтрует цель
+  (SSRF-guard) и набирает её в открытом интернете (TCP и UDP), качает обратно.
 - `internal/okapi`, `internal/vkapi` — REST-цепочка VK/OK, дающая креды `turn_server`.
-- `internal/mux` — KCP + smux поверх одного DTLS-соединения.
-- `internal/socks` — минимальный SOCKS5 (CONNECT) + per-stream target-заголовок.
-- `internal/authdtls` — взаимная PSK-аутентификация DTLS (ECDHE-PSK).
+- `internal/mux` — KCP + smux поверх одного DTLS-соединения + `Lane` (тег-демукс на
+  надёжную дорожку для TCP и ненадёжную датаграммную для QUIC/UDP) + шейп битрейта.
+- `internal/tunnel` — реле потоков и UDP-flow + `SSRF-guard` (блок loopback/приватных/
+  link-local/metadata-адресов, диал по проверенному IP).
+- `internal/socks` — SOCKS5 CONNECT и UDP ASSOCIATE + per-stream target-заголовок.
+- `internal/authdtls` — взаимная PSK-аутентификация DTLS (ECDHE-PSK); поддерживает
+  как единый `-secret`, так и per-client keyring (identity→secret) с отзывом.
+- `internal/vpntun`, `mobile/` — туннель как `Dialer` + gomobile-биндинг для Android.
 - `internal/captcha` — пользовательский добытчик кредов (с решением капчи), втыкается
   в seam `CredsFunc` клиента. **Не часть ядра**; turnvpn сам капчу не решает.
 
@@ -132,6 +146,17 @@ DNS-запросы через прокси при использовании SOC
 Без `-token` клиент берёт креды из подключённого в `main` провайдера (напр.
 решателя капчи), который поставляет пользователь.
 
+QUIC/HTTP-3 и прочий UDP идут через туннель наравне с TCP (SOCKS5 UDP ASSOCIATE на
+клиенте, ненадёжная датаграммная дорожка внутри). DNS резолвится на VPS.
+
+**Опциональные флаги:**
+
+- `-peer a:56000,b:56000` — несколько выходов; туннели раскладываются по ним ротацией.
+- `-shape 2mbit` (обе стороны) — шейп исходящего битрейта под «конверт» звонка.
+- Per-client доступ вместо единого секрета: на сервере `-keyring file`
+  (строки `identity secret`), у клиента `-identity <id>`. Отзыв клиента — удалить его
+  строку и перезапустить сервер.
+
 ## Android
 
 Нативное приложение **HolubVPN** (Kotlin + `VpnService`, Go-ядро через gomobile
@@ -141,16 +166,17 @@ DNS-запросы через прокси при использовании SOC
 ## Статус
 
 Vector 1 (TURN-реле + DTLS + SOCKS5) **работает end-to-end**: реальный HTTPS-браузинг
-выходит через VPS по инфраструктуре VK из белых списков, с пулом туннелей и
-проактивным обновлением кредов. Полная история — в `PLAN.md` и `LAB.md`, включая
-удалённый (в git-истории) ранний media-RTP подход.
+и QUIC/HTTP-3 выходят через VPS по инфраструктуре VK из белых списков, с пулом
+туннелей и проактивным обновлением кредов. Поднят харденинг: взаимная аутентификация
+(единый секрет или per-client keyring), SSRF-guard на выходе, non-root systemd на
+VPS, секрет в Keystore на Android, шейп битрейта и ротация выходов. Полная история —
+в `PLAN.md` и `LAB.md`, включая удалённый (в git-истории) ранний media-RTP подход.
 
 ---
 
 Tunnel ordinary internet traffic through the **whitelisted** TURN relays of VK
-calls, so a machine stuck in a whitelist-only network ("суверенный режим") can
-still reach the open internet. The traffic looks like a WebRTC call to the
-network.
+calls, so a machine stuck in a whitelist-only network can still reach the open
+internet. The traffic looks like a WebRTC call to the network.
 
 > **Personal research / educational project.** The ability to move data under
 > active whitelist conditions at up to **~25 Mbit/s** is a side effect.
@@ -200,11 +226,13 @@ TURN ChannelData          — relay addressing; indistinguishable from WebRTC me
 
 **What DTLS gives us**
 
-- **Mutual authentication (pre-shared key).** Both endpoints share a secret
-  (`-secret` / `TURNVPN_SECRET`) and the suite is **ECDHE-PSK**: the handshake
-  only completes if each side derives the same key, so an attacker without the
-  secret can neither pose as the VPS to the client (**no MITM**) nor use the VPS
-  as an open proxy. See `internal/authdtls`.
+- **Mutual authentication.** Both endpoints share a secret (`-secret` /
+  `TURNVPN_SECRET`) and the suite is **ECDHE-PSK**: the handshake only completes if
+  each side derives the same key, so an attacker without the secret can neither pose
+  as the VPS to the client (**no MITM**) nor use the VPS as an open proxy. Instead of
+  one shared secret the server can accept a **keyring** of per-client identities
+  (`-keyring` + the client's `-identity`): each client has its own key, revoked by
+  deleting its line. See `internal/authdtls`.
 - **Confidentiality + integrity** of the tunneled bytes. The suite is
   `ECDHE-PSK-WITH-CHACHA20-POLY1305` — an AEAD, so every record is encrypted and
   tamper-evident; the ephemeral ECDHE part gives **forward secrecy**. The relay,
@@ -219,22 +247,35 @@ authenticated TLS session end-to-end to the real site — the VPS and relay only
 ever see that inner ciphertext, never your plaintext. Your traffic is encrypted
 twice over the untrusted relay.
 
+**The exit is not an open relay (SSRF guard).** The client dictates each stream's
+target, but the server rejects loopback, private, link-local and metadata addresses
+(`169.254.169.254`) and dials the already-verified IP — so the tunnel can't be
+pointed at the VPS's internal services or cloud metadata, and DNS rebinding can't
+slip in between the check and the dial. See `internal/tunnel`.
+
 **What it still does *not* hide: the tunnel's existence.** Sustained high-volume
 traffic through a "call", and a TURN allocation egressing to an external IP, are
-detectable by traffic analysis. Reduce footprint (bitrate shaping, endpoint
-rotation); do not expect invisibility.
+detectable by traffic analysis. Footprint can be reduced — bitrate shaping
+(`-shape`) and exit rotation (a `-peer` list) are in place — but do not expect
+invisibility.
 
 ## Components
 
-- `cmd/client` — local SOCKS5 proxy; a pool of tunnels, each `smux → KCP → DTLS`
-  over a `pion/turn` allocation, with a background manager that refreshes
-  credentials before they expire.
-- `cmd/server` — on the VPS: terminates DTLS, demuxes streams, dials each
-  stream's target and pipes it back.
+- `cmd/client` — local SOCKS5 proxy (CONNECT + UDP ASSOCIATE); a pool of tunnels,
+  each `smux → KCP → DTLS` over a `pion/turn` allocation, with a background manager
+  that refreshes credentials before they expire. A comma-separated `-peer` spreads
+  tunnels across several exits (rotation).
+- `cmd/server` — on the VPS: terminates DTLS, demuxes streams, filters the target
+  (SSRF guard) and dials it on the open internet (TCP and UDP), piping it back.
 - `internal/okapi`, `internal/vkapi` — the VK/OK REST chain for `turn_server` creds.
-- `internal/mux` — KCP + smux over one DTLS connection.
-- `internal/socks` — minimal SOCKS5 (CONNECT) + per-stream target header.
-- `internal/authdtls` — mutual PSK DTLS authentication (ECDHE-PSK).
+- `internal/mux` — KCP + smux over one DTLS connection, plus a `Lane` (tag-demux into
+  a reliable path for TCP and an unreliable datagram path for QUIC/UDP) and rate shaping.
+- `internal/tunnel` — stream/UDP-flow relay + an `SSRF guard` (blocks loopback/private/
+  link-local/metadata addresses, dials the verified IP).
+- `internal/socks` — SOCKS5 CONNECT and UDP ASSOCIATE + per-stream target header.
+- `internal/authdtls` — mutual PSK DTLS authentication (ECDHE-PSK); supports a single
+  `-secret` or a per-client keyring (identity→secret) with revocation.
+- `internal/vpntun`, `mobile/` — the tunnel as a `Dialer` + gomobile binding for Android.
 - `internal/captcha` — a user-supplied captcha fetcher that plugs into the
   client's `CredsFunc` seam. **Not part of the core.**
 
@@ -267,6 +308,17 @@ locally. Keep the browser call alive while the tunnel is up. Without `-token`,
 the client uses the credential provider wired in `main` (e.g. a captcha fetcher)
 — which you supply.
 
+QUIC/HTTP-3 and other UDP ride the tunnel alongside TCP (SOCKS5 UDP ASSOCIATE on
+the client, an unreliable datagram lane inside). DNS resolves on the VPS.
+
+**Optional flags:**
+
+- `-peer a:56000,b:56000` — multiple exits; tunnels are spread across them (rotation).
+- `-shape 2mbit` (both ends) — shape the outbound bitrate toward a call-like envelope.
+- Per-client access instead of one shared secret: `-keyring file` on the server
+  (`identity secret` lines) and `-identity <id>` on the client; revoke a client by
+  deleting its line and restarting the server.
+
 ## Android
 
 The native Android app **HolubVPN** (Kotlin + `VpnService`, Go core bound through a
@@ -276,5 +328,8 @@ gomobile `.aar`: tun2socks reads the tun → our tunnel) lives in
 ## Status
 
 Vector 1 (TURN relay + DTLS + SOCKS5) is **working end-to-end**: real HTTPS
-browsing exits via the VPS over whitelisted VK infrastructure, with a tunnel pool
-and proactive credential refresh. See `PLAN.md` and `LAB.md` for the full history.
+browsing and QUIC/HTTP-3 exit via the VPS over whitelisted VK infrastructure, with
+a tunnel pool and proactive credential refresh. Hardening is in place: mutual
+authentication (a single secret or a per-client keyring), an SSRF guard on the exit,
+a non-root systemd service on the VPS, the secret in the Android Keystore, bitrate
+shaping and exit rotation. See `PLAN.md` and `LAB.md` for the full history.

@@ -6,10 +6,11 @@
 
 <p align="center"><i>Нативный Android-клиент проекта <b>turnvpn</b></i></p>
 
-Приложение на Kotlin поверх `VpnService`: системный VPN перехватывает TCP-трафик
+Приложение на Kotlin поверх `VpnService`: системный VPN перехватывает трафик
 телефона, а [tun2socks](https://github.com/xjasonlyu/tun2socks) отдаёт его в туннель
-turnvpn (TURN → DTLS → KCP/smux) до VPS. Go-ядро подключено через gomobile `.aar`.
-Общую картину проекта см. в [корневом README](../README.md).
+turnvpn (TURN → DTLS → KCP/smux) до VPS. TCP идёт по надёжной дорожке, QUIC/UDP — по
+ненадёжной датаграммной. Go-ядро подключено через gomobile `.aar`. Общую картину
+проекта см. в [корневом README](../README.md).
 
 ## Сборка
 
@@ -37,10 +38,12 @@ cd android && ./gradlew assembleDebug
 ## Оговорки
 
 - Пока **только arm64**.
-- Транспорт — **TCP**. DNS идёт через туннель по TCP автоматически (включать Private
-  DNS вручную не нужно); QUIC (UDP) откатывается на TCP.
+- TCP и UDP (QUIC/HTTP-3) идут через туннель; DNS резолвится на VPS автоматически
+  (включать Private DNS вручную не нужно). Секрет/токен хранятся в Android Keystore
+  (`EncryptedSharedPreferences`), бэкап приложения отключён.
 - Браузерный звонок нужно держать живым, пока VPN поднят.
 - Капчу приложение само не решает — это ручной шаг (human-in-the-loop).
+- Проверено на эмуляторе; на реальном устройстве ещё не обкатано.
 
 ## CLI-альтернатива (Termux)
 

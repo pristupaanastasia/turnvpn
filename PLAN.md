@@ -1,8 +1,9 @@
 # turnvpn — план
 
-Цель: восстановить доступ в открытый интернет для одного пользователя в режиме
-«белого списка» (суверенный режим), прокатив свой трафик поверх **whitelisted**
-инфраструктуры VK/OK так, чтобы для сети это выглядело легитимным звонком.
+Цель: восстановить доступ в открытый интернет для одного пользователя в сети, где
+наружу пускают только адреса из белого списка, прокатив свой трафик поверх
+инфраструктуры VK/OK из этого белого списка так, чтобы для сети это выглядело
+легитимным звонком.
 
 Дисциплина: лесенка «снизу вверх». Каждая ступень — максимально дешёвая проверка,
 которая **гейтит** следующую. Поднимаемся только пока нижняя ступень зелёная.
@@ -21,7 +22,7 @@
 
 | Путь | Идея | Статус |
 |------|------|--------|
-| **Vector 1 — TURN-реле** | Гонять трафик через whitelisted TURN VK на свой VPS | 🔶 **ВЕРОЯТНО ЖИВОЙ (пересматриваем).** Экосистема `cacggghp` доказывает, что реле форвардит на произвольный внешний пир, **если payload завёрнут в DTLS**. Наш старый вывод «мёртв» — false negative (гоняли сырой UDP). Гейт Stage 0 = перепроверить DTLS-обёрткой. |
+| **Vector 1 — TURN-реле** | Гонять трафик через TURN VK (из белого списка) на свой VPS | ✅ **ЖИВОЙ, подтверждён end-to-end.** Реальный HTTPS/QUIC-браузинг выходит через VPS по инфраструктуре VK из белого списка (Stage 0–7 пройдены). Старый вывод «мёртв» был false negative — гоняли сырой UDP; реле на data plane пропускает только то, что похоже на DTLS/медиа. |
 | **Variant A — data channel** | Байты в WebRTC DataChannel | ❌ **МЁРТВ**. `animoji`-DC эфемерный, серверные 15-байтовые кадры, инъекции не доходят. |
 | **Vector 2 — media RTP** | Байты внутри видео-RTP, pion-участник звонка | ✅ жив, но **ДОРОГОЙ** (нужен pion-webrtc + реверс ws2 + framing-кодек). **Fallback**, если Vector 1 отвалится. Join-стек (`vkcall`/`vchat`/`wt*`) удалён при развороте — восстановим из git-истории. |
 
@@ -33,7 +34,7 @@
                  ┌─ комп (клиент, в шатдауне достаёт только ВК) ─┐
   WireGuard  →   │  client: wrap в DTLS → pion/turn ChannelData  │
   (localhost)    └───────────────┬──────────────────────────────┘
-                                  │  (whitelisted: только TURN VK)
+                                  │  (белый список: только TURN VK)
                           TURN-реле VK (90.156.x.x:19302)
                                   │  UDP на твой VPS:PORT
                  ┌────────────────┴─────────────────────────────┐
@@ -96,7 +97,7 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
 - [x] `cmd/client`: локальный SOCKS5 на `127.0.0.1:1080` → поток в туннель.
 - [x] `cmd/server` (VPS): DTLS → mux → читает `host:port` → `net.Dial` → pipe.
 - [x] **Проверено:** `curl --socks5-hostname …` → exit-IP = VPS; `example.com` → `HTTP/2 200`.
-      Реальный браузинг через whitelisted TURN ВК работает **без WireGuard, без root**.
+      Реальный браузинг через TURN ВК (из белого списка) работает **без WireGuard, без root**.
 
 ### Stage 4 — (опц.) WireGuard поверх туннеля
 - [ ] Если нужен **весь** трафик машины (не только прокси-приложения): WG-клиент →
@@ -116,26 +117,33 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
       тревогу про данные внутри DTLS. `-secret`/`TURNVPN_SECRET` обязателен на
       обеих сторонах. Forward secrecy сохранён (ECDHE). Тест: `internal/authdtls`.
 
-### Stage 7 — UDP  ⬅️ **СЕЙЧАС ЗДЕСЬ**
-- [x] Сервер: UDP-ассоциации per-поток (`tunnel.handleUDP` — dial UDP,
-      length-prefixed датаграммы, idle-timeout) + схема `udp/` в заголовке потока.
-      Клиент (mobile): `udpConn` поверх потока + `vpntun.DialUDPStream` — QUIC и
-      прочий UDP идут через реле (DNS остаётся на DNS-over-TCP). Покрыто `TestUDPRelay`.
-- [ ] Редеплой `cmd/server` на VPS + проверка QUIC/HTTP3 с реального устройства.
-- [ ] (опц.) Десктопный `cmd/client`: SOCKS5 UDP ASSOCIATE (пока только
-      mobile/tun2socks путь даёт UDP).
+### Stage 7 — UDP  ✅ **ПРОЙДЕН**
+- [x] Сервер: UDP-ассоциации per-flow через **ненадёжную дорожку** (P1.1):
+      control-поток (`udp/`+target+flow-id) + lane-датаграммы по flow-id, idle-timeout.
+      QUIC идёт без head-of-line blocking (`internal/mux/lane.go`, `tunnel.handleUDP`).
+- [x] Редеплой `cmd/server` на VPS (non-root) + проверка: на эмуляторе
+      `cloudflare-quic.com` → **HTTP/3** через туннель.
+- [x] Десктопный `cmd/client`: SOCKS5 **UDP ASSOCIATE** (`serveUDPAssociate`,
+      `internal/tunnel/udpflow.go`) — UDP теперь не только через mobile/tun2socks.
+      Покрыто `TestUDPRelay`, `TestLaneDatagramAndStream`.
 
 ### Stage 8 — (опц.) вся машина через WireGuard
 - [ ] Для **всего** трафика машины (не только прокси-аппов): WG-клиент → локальный
       UDP клиента → туннель → WG-сервер на VPS → MASQUERADE. SOCKS хватает для веба.
 
-### Stage 9 — footprint + живучесть звонка
-- [ ] Шейп битрейта под правдоподобный «конверт» звонка; ротация эндпоинтов/звонков.
+### Stage 9 — footprint + живучесть звонка  🔶 **ЧАСТИЧНО** ⬅️ **СЕЙЧАС ЗДЕСЬ**
+- [x] Шейп битрейта (P2.3): token-bucket пейсит эмиссию DTLS под кап (`-shape 2mbit`,
+      `internal/mux/shaper.go`). Ротация эндпоинтов (P2.2): `cmd/client -peer` —
+      список через запятую, туннели round-robin по выходам.
+- [x] Per-client auth + отзыв (P0.3): серверный keyring (`-keyring`, identity→secret),
+      клиентская `-identity`; отзыв = убрать строку и перезапустить.
 - [ ] Хрупкость: всё держится на живом браузерном звонке + call-token; хост завершил
-      звонок — туннель упал. Нужна ротация/переоткрытие.
-- [ ] Реальность: устойчиво тяжёлый трафик через звонок аномален; снижаем footprint,
-      но не рассчитываем на невидимость. **Отказались:** массовое создание аккаунтов;
-      авто-обход капчи.
+      звонок — туннель упал. Нужен headless-держатель звонка / авто-переоткрытие (P2.4).
+- [ ] Снижение частоты капчи (P2.1) — research по VK API (окно ~10 мин).
+- [ ] (research) бенч/тюнинг KCP под потерями (P1.2/1.3).
+- [ ] Реальность: устойчиво тяжёлый трафик через звонок аномален; footprint снижаем
+      (шейп+ротация есть), но на невидимость не рассчитываем. **Отказались:** массовое
+      создание аккаунтов; авто-обход капчи.
 
 ### Stage 10 — Android-клиент
 - [ ] **Существующие приложения** есть в экосистеме `cacggghp/vk-turn-proxy`:
@@ -152,15 +160,20 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
 - [x] **Полный путь — СОБРАН (APK):** `mobile/` (gomobile-биндинг) = `vpntun` (туннель
       как Dialer) + `xjasonlyu/tun2socks`; `./scripts/build.sh aar` → `.aar`. Приложение
       `android/` (Kotlin + `VpnService`) собирается в APK (`./gradlew assembleDebug`).
-      Оговорки: arm64-only, TCP-only (DNS через Private DNS/DoT), на устройстве не обкатано.
-- [ ] Обкатать APK на реальном устройстве; добавить UDP (Stage 7) для полноценного DNS/QUIC.
+      DNS через туннель по TCP автоматически; UDP/QUIC — через ненадёжную дорожку (Stage 7).
+      Оговорки: arm64-only.
+- [x] UDP/QUIC добавлен (Stage 7) и проверен на эмуляторе (`cloudflare-quic.com` → HTTP/3).
+- [ ] Обкатать APK на реальном устройстве (пока проверено на эмуляторе).
 
 ---
 
 ## Среда / факты
 
-- **VPS** `<VPS>` (root, SSH по ключу с Mac). `vpsecho` на `:51822`,
-  ufw `51822/udp` открыт. (Старый raw-UDP эхо; для Stage 0 нужен DTLS-эхо.)
+- **VPS** `<VPS>` (SSH по ключу с Mac). `cmd/server` крутится **не под root**
+  (пользователь `turnvpn`) как persistent hardened systemd-юнит
+  (`/etc/systemd/system/turnvpn-server.service`: NoNewPrivileges, ProtectSystem=strict,
+  dropped caps), слушает DTLS на UDP `:56000`, секрет/keyring — в `/etc/turnvpn-server.env`
+  (600). Порт открыт в фаерволе.
 - **Референс** `github.com/cacggghp/vk-turn-proxy` — рабочая реализация Vector 1
   (TURN+DTLS+WireGuard). Берём архитектуру/детали протокола; **авто-решатель
   капчи оттуда не переносим**.
@@ -172,9 +185,15 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
 ## Репо
 
 - `cmd/client` — клиент (Mac): достаёт `turn_server` из звонка → TURN Allocate +
-  DTLS сквозь реле. Stage 0 = проба эха; дальше обрастает SOCKS5 + KCP/smux.
-- `cmd/server` — выход (VPS): Stage 0 = DTLS-эхо; дальше DTLS → mux → dial в интернет.
+  DTLS сквозь реле → пул туннелей → локальный SOCKS5 (CONNECT + UDP ASSOCIATE).
+- `cmd/server` — выход (VPS): DTLS → mux/lane → SSRF-фильтр → dial цели (TCP/UDP).
 - `internal/okapi`, `internal/vkapi` — VK/OK REST-цепочка до `turn_server`.
+- `internal/mux` — KCP+smux + `Lane` (тег-демукс reliable/unreliable) + footprint-шейп.
+- `internal/tunnel` — реле потоков/flow на сервере + клиентские UDP-flow; SSRF-guard.
+- `internal/socks` — SOCKS5 CONNECT + UDP ASSOCIATE, per-stream target-заголовок.
+- `internal/authdtls` — взаимная PSK-аутентификация DTLS (ECDHE-PSK) + keyring.
+- `internal/vpntun` — туннель как `Dialer` для mobile/tun2socks.
+- `mobile/`, `android/` — gomobile `.aar` + Kotlin-приложение **HolubVPN**.
 - `internal/graceful`, `internal/dotenv` — инфра (signal ctx, .env).
 - `internal/captcha` — решатель капчи (**WIP пользователя**, не часть моего кода;
   подключается как `CaptchaSolver` через интерфейс).
