@@ -7,139 +7,142 @@
 Дисциплина: лесенка «снизу вверх». Каждая ступень — максимально дешёвая проверка,
 которая **гейтит** следующую. Поднимаемся только пока нижняя ступень зелёная.
 
+> **РАЗВОРОТ 2026-11-18.** Изучён рабочий референс `cacggghp/vk-turn-proxy` (целая
+> экосистема клиентов). Он гоняет WireGuard **через TURN-реле VK** — т.е. по
+> **Vector 1**, который мы раньше объявили мёртвым. Наш вывод был **false
+> negative**: в M0 мы гнали через реле **сырой UDP**, а реле, судя по всему,
+> на data plane пропускает только то, что выглядит как **DTLS/медиа**. Референс
+> оборачивает payload в DTLS 1.2 — и всё ходит. Переключаемся на Vector 1: он
+> радикально короче SFU-пути (не нужен pion-webrtc, ws2, SDP-переговоры).
+
 ---
 
-## Что уже выяснено (не переоткрывать)
+## Что уже выяснено
 
 | Путь | Идея | Статус |
 |------|------|--------|
-| **Vector 1 — TURN-реле** | Гонять UDP через whitelisted TURN VK как generic relay на свой VPS | ❌ **МЁРТВ**. Control plane (Allocate/Permission/ChannelBind) проходит для произвольного внешнего пира, но **данные не ходят**: data plane реле зафайрволен на инфру VK/OK. Проверено tcpdump на VPS в обе стороны. |
-| **Variant A — data channel** | Сделать VPS участником звонка, тащить байты в WebRTC DataChannel | ❌ **МЁРТВ**. Единственный DC (`animoji`) эфемерный, закрывается в простое, несёт серверные 15-байтовые кадры; произвольные инъекции не доходят до пиров (0 из 4+ попыток). |
-| **Vector 2 — media RTP** | Стать участником звонка, тащить байты внутри **видео-RTP** | ✅ **ЖИВОЙ**. SFU **форвардит** закодированные кадры, **не транскодит** (подтверждено: cost/архитектура + инъекция синтетического VP8-трека, который VK ренеготиировал и раздал пирам). Байты в валидном VP8/H.264-кадре доходят до пира целиком. |
-
-**Вывод:** работаем по **Vector 2**. Граница — браузер не умеет авторить битстрим
-(Chrome переэнкодит пиксели канвы), поэтому нужен **нативный клиент (pion)**,
-который сам строит RTP/кадры. Его кадры SFU форвардит как есть.
+| **Vector 1 — TURN-реле** | Гонять трафик через whitelisted TURN VK на свой VPS | 🔶 **ВЕРОЯТНО ЖИВОЙ (пересматриваем).** Экосистема `cacggghp` доказывает, что реле форвардит на произвольный внешний пир, **если payload завёрнут в DTLS**. Наш старый вывод «мёртв» — false negative (гоняли сырой UDP). Гейт Stage 0 = перепроверить DTLS-обёрткой. |
+| **Variant A — data channel** | Байты в WebRTC DataChannel | ❌ **МЁРТВ**. `animoji`-DC эфемерный, серверные 15-байтовые кадры, инъекции не доходят. |
+| **Vector 2 — media RTP** | Байты внутри видео-RTP, pion-участник звонка | ✅ жив, но **ДОРОГОЙ** (нужен pion-webrtc + реверс ws2 + framing-кодек). **Fallback**, если Vector 1 отвалится. Join-стек (`vkcall`/`vchat`/`wt*`) удалён при развороте — восстановим из git-истории. |
 
 ---
 
-## Vector 2 — стадии
+## Как это работает (Vector 1, по референсу)
 
-> Каждая стадия гейтит следующую. Не писать код стадии N, пока N-1 не зелёная.
-
-### Stage 1 — реверс сигналинга  ⬅️ **СЕЙЧАС ЗДЕСЬ**
-Чтобы pion зашёл в звонок, надо говорить на сигналинге. **ПЕРЕОСМЫСЛЕНО
-2026-11-17 после первой живой капчи** (см. `LAB.md`): сигналинг устроен иначе,
-чем думали.
-
-> **Ключевая находка:** `calls.okcdn.ru/fb.do` — это **телеметрия**, НЕ сигналинг
-> (периодический стат-репорт, `data=<JSON>` → `{"metrics_reported":N}`). Реальный
-> WebRTC-стек (PeerConnection + OK TopGun-сигналинг, вероятно WS к tgserver)
-> живёт в **изолированном Web Worker** — невидим для хуков страницы
-> (fetch/XHR/WebSocket/RTCPeerConnection.prototype все дали 0 SDP). Бутстрап же
-> идёт через **VK API** `web.api.vk.ru/method/...`.
-
-Задача распадается на два слоя:
-
-- [x] **1a. Capture-харнесс** — `tools/fbdo-capture/capture.js` (хук fetch+XHR+WS,
-      топ+same-origin фреймы, поллер 150ms) + `analyze/` (Go). Собрано, смоук-ок.
-- [x] **1b. Снять первый живой звонок** — снято через Claude-in-Chrome
-      (залогиненный, 3 участника). Вывод: см. находку выше.
-- [x] **1c-слой-A (частично). VK API бутстрап размечен по эндпоинтам:**
-      `messages.getCurrentCalls`, `messages.getCallPreview`,
-      `calls.getConversationByCall`, `messages.getCallParticipants`, `batch.call`.
-      Осталось снять **редактированные тела** `getCallPreview`/
-      `getConversationByCall` → что именно (OK-conversation id, join-токен,
-      endpoint) передаётся воркеру.
-- [x] **1c-слой-A+. SDP-контракт снят целиком** (`tools/fbdo-capture/sdp-reference.md`).
-      Хук **конструктора** RTCPeerConnection (на лобби того же документа → join)
-      показал: **PeerConnection ЖИВЁТ В СТРАНИЦЕ**, воркер-перехват для SDP не
-      нужен. **SFU = offerer, pion = answerer** (setup active, DTLS client);
-      bundle 0/1/2, rtcp-mux; VP8(96)+rtx, H264×6, AV1, H265, opus(111); RID-симулкаст.
-- [x] **1c-слой-B. Транспорт сигналинга РАЗГАДАН** (`signaling-reference.md`).
-      `fb.do` = **OK API**. Флоу джойна: `auth.anonymLogin` → session_key;
-      `vchat.joinConversationByLink` → дескриптор SFU с
-      **`endpoint: wss://videowebrtc.okcdn.ru/ws2`** (сигнальный WS) + token +
-      STUN/TURN (`90.156.236.x:19302`); `vchat.clientStats` = телеметрия.
-      SDP/ICE идут внутри **ws2** (движок кеширует `WebSocket` → мимо хука).
-- [x] **1d. pion-join спека — на 90%** (`signaling-reference.md`): REST-бутстрап
-      (anonymToken → anonymLogin → joinConversationByLink) + ws2 + answerer-SDP.
-- [ ] **1d-tail. Wire-формат ws2** — единственный незакрытый кусок: как завёрнуты
-      offer/answer/ICE внутри `wss://.../ws2` (JSON vs OK TopGun base64). Нужен
-      перехват `WebSocket`/`WebTransport` ДО загрузки движка (ранняя инъекция в
-      document_start). Без него нельзя дописать клиент ws2.
-- [ ] **1d. Спецификация pion-join-клиента** — VK API бутстрап + воркер-сигналинг
-      в одну воспроизводимую последовательность.
-- [ ] **1e. pion joins** — headless pion-пир заходит в звонок, негоциирует
-      audio+video до `connected`. **Критерий выхода Stage 1.**
-
-### Stage 2 — proof пропускания байтов
-- [ ] Из pion-пира отправить кадры, в payload которых зашит известный маркер;
-      на втором контролируемом участнике подтвердить, что **точные байты дошли**
-      (SFU форварднул нетронутыми). Это добивает make-or-break уже реальными
-      кадрами, а не канвой браузера.
-
-### Stage 3 — framing-кодек
-- [ ] Паковать датаграммы туннеля в валидные VP8/H.264-кадры: каденция
-      keyframe'ов, нумерация, пересборка на той стороне, FEC/ARQ под потери и BWE.
-- [ ] Двусторонне (оба конца — участники звонка).
-- [ ] Слушаться PLI (запросы keyframe) и BWE (битрейт), иначе кадры дропаются.
-
-### Stage 4 — транспорт + WireGuard
-- [ ] Выставить медиа-канал как datagram-транспорт.
-- [ ] Поднять WireGuard поверх него (wg делает всю крипту и tun; медиа — просто
-      транспорт). VPS-конец форвардит в открытый интернет (MASQUERADE).
-
-### Stage 5 — устойчивость + footprint
-- [ ] Re-join при обрыве, keepalive, обработка смены адресов.
-- [ ] Шейпить битрейт под правдоподобный «конверт» звонка; ротация эндпоинтов.
-- [ ] Реальность: устойчиво тяжёлый трафик через звонок аномален по природе —
-      можно снижать footprint, но не рассчитывать на невидимость.
-      **Отказались:** автоматизация массового создания аккаунтов для обхода банов.
-
----
-
-## Ближайший шаг (make-or-break)
-
-Запустить capture в живом звонке и разобрать `fb.do` (Stage 1b→1c):
-
-```sh
-# 1. Открыть звонок, вставить tools/fbdo-capture/capture.js в консоль → "[cap] armed"
-# 2. Поднять 2-го участника: аноним-гость из РАЗЛОГИНЕННОЙ обычной вкладки
-#    (не инкогнито; одна вкладка/аккаунт на профиль). Камеру включить.
-# 3. ~10-15с, затем в консоли:
-__capStats(); __capSave();   // → cap.json
-# 4. Разобрать:
-go run ./tools/fbdo-capture/analyze -in cap.json            # полный таймлайн
-go run ./tools/fbdo-capture/analyze -in cap.json -grep sdp  # только SDP-события
+```
+                 ┌─ комп (клиент, в шатдауне достаёт только ВК) ─┐
+  WireGuard  →   │  client: wrap в DTLS → pion/turn ChannelData  │
+  (localhost)    └───────────────┬──────────────────────────────┘
+                                  │  (whitelisted: только TURN VK)
+                          TURN-реле VK (90.156.x.x:19302)
+                                  │  UDP на твой VPS:PORT
+                 ┌────────────────┴─────────────────────────────┐
+                 │  server (VPS, открытый интернет):             │
+                 │  приём UDP → DTLS-расшифровка → WireGuard →    │
+                 │  MASQUERADE в открытый интернет               │
+                 └──────────────────────────────────────────────┘
 ```
 
-Результат `analyze` → размечаем протокол и специм pion-join (Stage 1d).
+**Почему нужен VPS:** реле форвардит на **один** привязанный пир — это не открытый
+прокси. Пир должен быть в открытом интернете (вне шатдауна) и реально выпускать
+трафик (WireGuard+MASQUERADE). Комп в шатдауне сам отрезан от сети, выходом быть не
+может. Клиентская крипта/обёртка крутится на компе; VPS — только выходная нода.
+
+**Креды TURN добываются REST-цепочкой (без реального входа в звонок):**
+```
+get_anonym_token                         → token1 (анон-JWT, капча-free)
+calls.getAnonymousToken(link,name,token1)→ token2 (call-token)   ← ЕДИНСТВЕННАЯ капча
+auth.anonymLogin (session_data, version:2, БЕЗ auth_token) → session_key
+vchat.joinConversationByLink(link, anonymToken=token2, session_key)
+      → turn_server{username, credential, urls}   ← КРЕДЫ TURN (живут ~10 мин)
+```
+
+**Капча** — только на шаге `getAnonymousToken`, раз в ~10 мин. Решаем её
+**человеком-в-цикле** (пользователь проходит в браузере / подставляет `-token`).
+Авто-решатель анти-бота (PoW + подделка курсора/сенсоров/отпечатка под
+`captchaNotRobot`) **НЕ реализуем** — это обход бот-детекта, вне рамок проекта.
+
+---
+
+## Vector 1 — стадии
+
+> Каждая стадия гейтит следующую.
+
+### Stage 0 — make-or-break: DTLS-реле форвардит на VPS  ✅ **ПРОЙДЕН (2026-11-18)**
+Перепроверили M0 правильно: `pion/turn` Allocate с живыми TURN-кредами → `pion/dtls`
+handshake сквозь relay на VPS, DTLS-эхо назад.
+- [x] Клиент (`cmd/client`): получить `turn_server` из звонка (капчу прошёл человек).
+- [x] Клиент: `pion/turn` Allocate → `pion/dtls` handshake до VPS через relay.
+- [x] Сервер на VPS (`cmd/server`): `pion/dtls` server, принять, расшифровать, эхо.
+- [x] **Критерий ВЫПОЛНЕН:** маркер прошёл Mac→реле→VPS→обратно; VPS принял DTLS от
+      адреса аллокации реле. **Vector 1 жив, M0-негатив опровергнут** (см. `LAB.md`).
+
+### Stage 1 — клиент добычи кредов  ⬅️ **СЕЙЧАС ЗДЕСЬ**
+- [x] `get_anonym_token` → анон-JWT (`vkapi.GetAnonymToken`, капча-free).
+- [x] `calls.getAnonymousToken` → call-token (`vkapi.GetCallToken`; капча = человек).
+- [ ] `auth.anonymLogin` **рабочая форма** (version:2, client_version 1.1,
+      `client_type:SDK_JS`, **без auth_token**) → session_key. *(правим `okapi`.)*
+- [x] `vchat.joinConversationByLink` → дескриптор c `turn_server`.
+- [ ] Кеш кредов ~10 мин + перезапрос (креды короткоживущие).
+
+### Stage 2 — DTLS relay-клиент
+- [ ] `listen` локальный UDP (туда смотрит WireGuard-клиент).
+- [ ] `pion/turn` Allocate → `relayConn.WriteTo(peer=VPS)`; переобёртка пакетов.
+- [ ] `pion/dtls` поверх relay (self-signed, InsecureSkipVerify) — так payload
+      проходит data plane реле.
+- [ ] Реконнект при протухании кредов/аллокации; опц. параллельные потоки.
+
+### Stage 3 — server на VPS
+- [ ] Приём UDP от реле на `:PORT` → `pion/dtls` server → расшифровка.
+- [ ] Форвард расшифрованного в локальный WireGuard (`-connect 127.0.0.1:<wg>`).
+- [ ] Обратный путь (ответы WG → DTLS → reply на реле → клиент).
+
+### Stage 4 — WireGuard end-to-end
+- [ ] Поднять wg: конфиг клиента смотрит на локальный `listen` клиента; сервер wg
+      на VPS за `server`-прокси; MASQUERADE в интернет.
+- [ ] Проверить реальный трафик (ping/curl через туннель).
+
+### Stage 5 — устойчивость + footprint
+- [ ] Re-join/refresh кредов, keepalive, смена адресов.
+- [ ] Шейп битрейта под правдоподобный «конверт» звонка; ротация эндпоинтов.
+- [ ] Реальность: устойчиво тяжёлый трафик через звонок аномален; снижаем
+      footprint, но не рассчитываем на невидимость.
+      **Отказались:** массовое создание аккаунтов; авто-обход капчи.
+
+---
+
+## Ближайший шаг
+
+1. Поправить `okapi.AnonymLogin` под рабочую форму (version:2, без auth_token).
+2. Написать `cmd/relaytest` (или расширить `cmd/probe`): клиент DTLS-через-relay +
+   DTLS-эхо-сервер для VPS — это и есть гейт Stage 0.
+3. Прогнать Stage 0 с живыми кредами (капчу проходит человек).
 
 ---
 
 ## Среда / факты
 
 - **VPS** `<VPS>` (root, SSH по ключу с Mac). `vpsecho` на `:51822`,
-  ufw `51822/udp` открыт. Использовался для data-plane проверки Vector 1.
-- **VK web instrumentation** (для любых будущих тестов) — подробности в
-  memory-ноте `turnvpn-feasibility`: один VK-сеанс на профиль; две вкладки
-  кикают друг друга; аноним-гость из разлогиненной (не инкогнито) вкладки —
-  отдельный участник, не кикает; расширение не видит инкогнито; одна физкамера —
-  второй вкладке инжектить синтетику через `canvas.captureStream`+`addTransceiver`;
-  PC ловится хуком `RTCPeerConnection.prototype` только после leave+rejoin.
-- **Fallback, если бросаем VK целиком:** конвенциональный транспорт на зарубежный
-  VPS — WireGuard + обфускация/domain-fronting/CDN. Проще и надёжнее, но IP не в
-  белом списке (т.е. не решает исходную задачу суверенного режима).
+  ufw `51822/udp` открыт. (Старый raw-UDP эхо; для Stage 0 нужен DTLS-эхо.)
+- **Референс** `github.com/cacggghp/vk-turn-proxy` — рабочая реализация Vector 1
+  (TURN+DTLS+WireGuard). Берём архитектуру/детали протокола; **авто-решатель
+  капчи оттуда не переносим**.
+- **Капча:** только `getAnonymousToken`, ~10-мин окно, человек-в-цикле.
+- **VK web instrumentation** — см. memory-ноту `turnvpn-feasibility`.
 
 ---
 
 ## Репо
 
-- `cmd/probe` — TURN-проба (реальное реле) + локальный round-trip тест (зелёный).
-- `cmd/vpsecho` — UDP-эхо на VPS для data-plane проверки.
-- `internal/graceful` — signal ctx, tracked goroutines, bounded shutdown.
-- `internal/dotenv` — минимальный загрузчик `.env` (креды не коммитим).
-- `tools/sfu-probe` — браузерный инструмент для гейта transcode-vs-forward (пройден).
-- `tools/fbdo-capture` — Stage 1: capture + analyze сигналинга.
-- `.env`, `.proxyai/`, `cap.json` — в `.gitignore`.
+- `cmd/client` — клиент (Mac): достаёт `turn_server` из звонка → TURN Allocate +
+  DTLS сквозь реле. Stage 0 = проба эха; дальше обрастает SOCKS5 + KCP/smux.
+- `cmd/server` — выход (VPS): Stage 0 = DTLS-эхо; дальше DTLS → mux → dial в интернет.
+- `internal/okapi`, `internal/vkapi` — VK/OK REST-цепочка до `turn_server`.
+- `internal/graceful`, `internal/dotenv` — инфра (signal ctx, .env).
+- `internal/captcha` — решатель капчи (**WIP пользователя**, не часть моего кода;
+  подключается как `CaptchaSolver` через интерфейс).
+- `.env`, `.proxyai/`, `cap.json`, бинарники `client`/`server` — в `.gitignore`.
+
+> Vector 2 (SFU-join стек `vkcall/vchat/wt*`, `cmd/vkjoin`) и старые пробы
+> (`cmd/probe`, `cmd/vpsecho`, `tools/*`) **удалены** при развороте на Vector 1 —
+> восстановимы из git-истории, если fallback-путь когда-нибудь понадобится.

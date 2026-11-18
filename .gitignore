@@ -16,3 +16,7 @@ secrets/
 *.creds.env
 vk-creds*.env
 /vkjoin
+/client
+/server
+/turnvpn-client
+/turnvpn-server

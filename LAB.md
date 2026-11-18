@@ -6,6 +6,34 @@
 
 ---
 
+## 2026-11-18 — 🎉 Vector 1 ЖИВОЙ: DTLS сквозь TURN-реле ВК доходит до VPS (M0 переопределён)
+
+**Stage:** Vector 1 / Stage 0 (make-or-break) · **Verdict:** ✅ **PASS — гипотеза подтверждена, старый M0-негатив опровергнут**
+
+- **Tried:** собрал `cmd/server` (DTLS-эхо, `pion/dtls`) — запущен на VPS `<VPS>:56000`
+  (systemd-юнит). Собрал `cmd/client`: достаёт `turn_server` из живого звонка
+  (`anonymLogin` version:2 без токена → `joinConversationByLink` с `anonymToken`), затем
+  `pion/turn` Allocate → `pion/dtls` **handshake сквозь relay** на VPS → отправка маркера.
+  Call-token снят из браузера (капчу «я не робот» прошёл человек).
+- **Result:** клиент (Mac):
+  ```
+  got turn_server 95.163.34.180:19302
+  allocated relay 95.163.34.180:33472
+  permission created for peer <VPS>:56000
+  DTLS handshake OK through relay
+  STAGE 0 PASS — "turnvpn-stage0" echoed back
+  ```
+  VPS (server): `DTLS connection from 95.163.34.180:33472` → `echo 14 bytes` → EOF.
+- **Evidence:** лог обеих сторон + VPS принял DTLS **от адреса аллокации реле** (95.163.34.180),
+  расшифровал 14 байт ("turnvpn-stage0"), отразил; клиент получил эхо.
+- **Conclusion:** **TURN-реле ВК форвардит на ПРОИЗВОЛЬНЫЙ внешний пир (VPS), если payload
+  завёрнут в DTLS.** Наш M0 (2026-11-17) говорил «data plane зафайрволен, Vector 1 мёртв» —
+  это был **false negative**: мы гнали через реле сырой UDP, который реле молча дропает.
+  Разница — только DTLS-обёртка. Vector 1 (TURN-реле) воскрешён как основной путь; тяжёлый
+  SFU-путь Vector 2 паркуется в fallback.
+- **Next:** Stage 1-3 по Vector 1 — слой кредов (кеш 10 мин) + KCP/smux + SOCKS5 поверх туннеля
+  → реальный выход в интернет без WireGuard (SOCKS-вариант).
+
 ## 2026-11-18 — Токенов ДВА, не один: anonymLogin ≠ join (баг клиента исправлен)
 
 **Stage:** rung 14 (нативный join) · **Verdict:** 🔶 найден и исправлен баг модели токенов; живая валидация ещё впереди

@@ -120,27 +120,23 @@ type AnonymLoginResult struct {
 	APIServer        string `json:"api_server"`
 }
 
-// AnonymLogin performs auth.anonymLogin and returns the OK session. On success it
-// stores SessionKey (and APIServer, if returned) on the client for subsequent
-// calls. deviceID is a stable per-device UUID; clientVersion identifies the client
-// build.
+// AnonymLogin performs auth.anonymLogin and returns the OK session (session_key).
+// On success it stores SessionKey (and APIServer, if returned) on the client for
+// subsequent calls. deviceID is a stable per-device UUID.
 //
-// authToken is the VK anonymous ACCESS token (the "anonym.<jwt>" from
-// GetAnonymToken / the login service), NOT the per-call guest token. This is the
-// identity token the web client wires as ry.authToken and sends as the anonymLogin
-// auth_token (engine oX → ok.authorize); the per-call token (a.token / ry.anonymToken)
-// is a separate value used only as joinConversationByLink's anonymToken. Sending the
-// call token here fails with "AUTH_LOGIN : Access token is broken". The anonymLogin
-// identity (this JWT's anonym_id) must match the identity the join's anonymToken was
-// minted for, so both must come from the same anonymous session.
-func (c *Client) AnonymLogin(ctx context.Context, authToken, deviceID, clientVersion string) (*AnonymLoginResult, error) {
+// This is an ANONYMOUS session bootstrap and carries NO token: the request body is
+// session_data = {version:2, device_id, client_version:1.1, client_type:"SDK_JS"},
+// no auth_token and (skipAuth) no session_key. The anonymous identity is bound later
+// at JoinConversationByLink via the per-call anonymToken. Sending a token here as
+// auth_token is rejected by the server with "AUTH_LOGIN : Access token is broken".
+// Form confirmed against the working reference client (cacggghp/vk-turn-proxy).
+func (c *Client) AnonymLogin(ctx context.Context, deviceID string) (*AnonymLoginResult, error) {
 	data, err := c.call(ctx, "auth.anonymLogin", Params{
 		"session_data": map[string]any{
+			"version":        2,
 			"device_id":      deviceID,
-			"client_version": clientVersion,
+			"client_version": 1.1,
 			"client_type":    WebClientType,
-			"auth_token":     authToken,
-			"version":        3,
 		},
 	}, true)
 	if err != nil {
