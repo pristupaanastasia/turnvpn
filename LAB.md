@@ -6,6 +6,46 @@
 
 ---
 
+## 2026-11-18 — Stage 7: UDP-реле поверх туннеля (сервер + mobile)
+
+**Stage:** Stage 7 (UDP) · **Verdict:** ✅ транспорт+сервер готовы, покрыты тестом;
+с реального устройства ещё не прогнано (нужен редеплой сервера на VPS)
+
+- **Tried:** UDP-ассоциации per-поток. Заголовок потока со схемой `udp/`
+  (`tunnel.OpenUDP`); сервер `handleUDP` диалит UDP и гоняет length-prefixed
+  (uint16) датаграммы в обе стороны с idle-timeout. Клиент — `vpntun.DialUDPStream`
+  + mobile `udpConn` (`net.PacketConn` поверх smux-потока). В `mobile.DialUDP`
+  QUIC/прочий UDP → реле, DNS остаётся на DNS-over-TCP (совместимо со старым сервером).
+- **Result:** `TestUDPRelay` (UDP-echo сквозь PSK-DTLS → KCP → smux → dial) зелёный;
+  `go build/vet ./...` ок.
+- **Evidence:** `internal/tunnel/tunnel_test.go:TestUDPRelay` (3 датаграммы, вкл.
+  1200 байт) PASS.
+- **Conclusion:** QUIC/HTTP3/игровой UDP теперь может идти через туннель, не только
+  TCP. Framing простой и с границами (uint16, `maxDatagram`, `udpIdle`).
+- **Next:** редеплой `cmd/server` на VPS и проверка QUIC с телефона; опц. SOCKS5 UDP
+  ASSOCIATE в десктопном `cmd/client`.
+
+## 2026-11-18 — Android-клиент (HolubVPN) поднимает туннель end-to-end
+
+**Stage:** Vector 1 / мобильный клиент · **Verdict:** ✅ коннект на устройстве подтверждён
+
+- **Tried:** APK на эмуляторе (arm64, 1080×2280): «Get token» (капчу решил человек в
+  WebView) → «Connect». Ядро — gomobile `.aar` (tun2socks → `vpntun` →
+  TURN + PSK-DTLS + KCP/smux).
+- **Result:** `turnvpn started` — eager-connect поднял туннель (креды/TURN/DTLS ок).
+  DNS резолвится **через туннель по TCP** (DNS-over-TCP в ядре: UDP :53 → TCP-поток):
+  в логах исчезли отказы `1.1.1.1:53`, Google-IP резолвятся; QUIC (UDP:443)
+  по-прежнему отбивается → TCP-фолбэк в браузере. Connect↔Disconnect стабильны,
+  в статусбаре ключ VPN.
+- **Evidence:** logcat `turnvpn started`; нет отказов `UDP 1.1.1.1:53`, есть отказы
+  `UDP 172.217.x:443` (QUIC) ⇒ DNS прошёл; процесс жив после Disconnect.
+- **Conclusion:** мобильный путь рабочий: WebView-захват токена (человек решает
+  капчу) + `VpnService` + ядро = трафик через VK TURN с телефона. DNS-over-TCP
+  снимает требование вручную включать Private DNS.
+- **Fix:** вылет на Connect/Disconnect был `fdsan SIGABRT` (tun-fd принадлежал и
+  `ParcelFileDescriptor`, и tun2socks) — теперь Go получает независимый `dup()`.
+- **Next:** Stage 7 — полноценный UDP поверх туннеля (QUIC/игры); сейчас только DNS.
+
 ## 2026-11-18 — Stage 5: живой end-to-end через пул + авто-рефреш (капча — ручной фолбэк)
 
 **Stage:** Vector 1 / Stage 5 · **Verdict:** ✅ транспорт (пул + рефреш) подтверждён вживую

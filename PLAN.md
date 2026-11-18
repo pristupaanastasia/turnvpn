@@ -117,8 +117,13 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
       обеих сторонах. Forward secrecy сохранён (ECDHE). Тест: `internal/authdtls`.
 
 ### Stage 7 — UDP  ⬅️ **СЕЙЧАС ЗДЕСЬ**
-- [ ] SOCKS5 UDP ASSOCIATE на клиенте + проброс датаграмм в туннель; на сервере —
-      UDP-ассоциации per-поток. Нужно для QUIC/HTTP3, DNS-over-UDP, игр.
+- [x] Сервер: UDP-ассоциации per-поток (`tunnel.handleUDP` — dial UDP,
+      length-prefixed датаграммы, idle-timeout) + схема `udp/` в заголовке потока.
+      Клиент (mobile): `udpConn` поверх потока + `vpntun.DialUDPStream` — QUIC и
+      прочий UDP идут через реле (DNS остаётся на DNS-over-TCP). Покрыто `TestUDPRelay`.
+- [ ] Редеплой `cmd/server` на VPS + проверка QUIC/HTTP3 с реального устройства.
+- [ ] (опц.) Десктопный `cmd/client`: SOCKS5 UDP ASSOCIATE (пока только
+      mobile/tun2socks путь даёт UDP).
 
 ### Stage 8 — (опц.) вся машина через WireGuard
 - [ ] Для **всего** трафика машины (не только прокси-аппов): WG-клиент → локальный

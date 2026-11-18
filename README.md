@@ -1,8 +1,12 @@
-# turnvpn
+<p align="center">
+  <img src="docs/assets/holubvpn.png" width="120" alt="HolubVPN" />
+</p>
 
-Прокидываем обычный интернет-трафик через **whitelisted** TURN-реле звонков VK,
-чтобы машина в сети «только по белому списку» («суверенный режим») могла
-достучаться до открытого интернета. Для сети трафик выглядит как WebRTC-звонок.
+<h1 align="center">HolubVPN</h1>
+
+Прокидываем обычный интернет-трафик через TURN-реле звонков VK (они в белых
+списках), чтобы машина из сети, где доступ открыт только к адресам из белого списка,
+могла достучаться до открытого интернета. Для сети трафик выглядит как WebRTC-звонок.
 
 > **Личный исследовательский / учебный проект.** Возможность передавать данные
 > в условиях включённых белых списков со скоростью до **~25 Мбит/с** — побочный эффект.
@@ -10,11 +14,11 @@
 ## Как это работает
 
 TURN-серверы за звонками VK — в белом списке (одобренному приложению они нужны).
-Они форвардят UDP на **один** пир, который ты сам привязал — если это твой VPS в
-открытом интернете, реле становится «ступенькой» наружу из белого списка. Реле
-пропускает только то, что похоже на WebRTC-медиа, поэтому мы заворачиваем всё в
-**DTLS** (им оборачиваются настоящие звонки). Поверх — надёжный мультиплексированный
-транспорт, наружу отдаём локальным SOCKS5-прокси.
+Они форвардят UDP на **один** привязанный к аллокации пир — если это VPS в открытом
+интернете, реле становится «ступенькой» наружу из белого списка. Реле пропускает
+только то, что похоже на WebRTC-медиа, поэтому всё заворачивается в **DTLS** (им
+оборачиваются настоящие звонки). Поверх — надёжный мультиплексированный транспорт,
+наружу — локальный SOCKS5-прокси.
 
 ```
   machine inside the whitelist                               open internet
@@ -34,7 +38,7 @@ TURN-серверы за звонками VK — в белом списке (о�
 (`turn_server {username, credential, urls}`), который достаётся REST-цепочкой VK/OK
 (`get_anonym_token` → `getAnonymousToken` → `anonymLogin` → `joinConversationByLink`).
 Чтобы получить per-call токен, раз в ~10 минут нужно пройти проверку VK «я не робот» —
-**человеком** (решаешь в браузере). turnvpn сам капчу **не** решает.
+**человеком** (она решается в браузере). turnvpn сам капчу **не** решает.
 
 ## Безопасность данных в DTLS-пакетах
 
@@ -69,15 +73,15 @@ TURN ChannelData          — адресация реле; неотличимо 
 **Эшелонированная защита.** DTLS уже аутентифицирует оба конца, но payload
 **дополнительно** защищён прикладным слоем: веб — это HTTPS, т.е. вторая,
 аутентифицированная TLS-сессия end-to-end до самого сайта — VPS и реле видят только
-этот внутренний TLS-шифротекст, не твой plaintext. Итог: трафик зашифрован **дважды**
-поверх недоверенного реле, и единственный, кто видит адрес назначения в открытую —
-твой собственный VPS.
+этот внутренний TLS-шифротекст, а не исходный plaintext. Итог: трафик зашифрован
+**дважды** поверх недоверенного реле, а адрес назначения в открытую виден только
+собственному VPS.
 
 **Чего это всё равно НЕ скрывает: сам факт туннеля.** Payload зашифрован и
 аутентифицирован, но устойчиво тяжёлый трафик через «звонок» и TURN-аллокация с
-egress'ом на внешний IP палятся трафик-анализом. Шифрование защищает *что* ты шлёшь,
-а не *факт*, что туннель работает. Снижай footprint (шейп битрейта, ротация
-эндпоинтов); на невидимость не рассчитывай.
+egress'ом на внешний IP палятся трафик-анализом. Шифрование защищает *что* передаётся,
+а не *факт* работы туннеля. Footprint стоит снижать (шейп битрейта, ротация
+эндпоинтов); на невидимость рассчитывать не стоит.
 
 ## Компоненты
 
@@ -95,9 +99,8 @@ egress'ом на внешний IP палятся трафик-анализом.
 
 ## Запуск
 
-Выбери общий секрет и задай его на **обеих** сторонах (`-secret` или
-`TURNVPN_SECRET`) — он взаимно аутентифицирует туннель, чтобы выход не был открытым
-прокси.
+Общий секрет задаётся на **обеих** сторонах (`-secret` или `TURNVPN_SECRET`) — он
+взаимно аутентифицирует туннель, чтобы выход не был открытым прокси.
 
 На VPS (открой UDP-порт в фаерволе):
 
@@ -106,7 +109,7 @@ go build -o server ./cmd/server
 TURNVPN_SECRET='<общий секрет>' ./server -listen 0.0.0.0:56000
 ```
 
-На своей машине (с per-call токеном, снятым из браузерного звонка):
+На клиентской машине (с per-call токеном, снятым из браузерного звонка):
 
 ```sh
 go build -o client ./cmd/client
@@ -116,56 +119,31 @@ TURNVPN_SECRET='<тот же секрет>' TURN_CALL_TOKEN='<call-token>' ./cli
   -tunnels 2
 ```
 
-После запуска клиент поднимает локальный **SOCKS5-прокси на `127.0.0.1:1080`**.
-Пропиши его в браузере (или в системе) как прокси: тип **SOCKS5**, адрес
-`127.0.0.1`, порт `1080`, и включи «проксировать DNS через прокси» (remote DNS) —
+После запуска клиент поднимает локальный **SOCKS5-прокси на `127.0.0.1:1080`**. Его
+нужно указать в браузере (или в системе) как прокси: тип **SOCKS5**, адрес
+`127.0.0.1`, порт `1080`, и включить «проксировать DNS через прокси» (remote DNS) —
 чтобы имена сайтов резолвились на VPS, а не локально (локальный DNS в шатдауне может
 быть недоступен). Пример для Firefox: *Настройки → Настройки сети → Ручная настройка
 прокси → узел SOCKS `127.0.0.1`, порт `1080`, SOCKS v5* + галочка *«Отправлять
 DNS-запросы через прокси при использовании SOCKS v5»*. После этого весь трафик
-браузера идёт через туннель. Держи браузерный звонок живым, пока туннель поднят.
+браузера идёт через туннель. Браузерный звонок нужно держать живым, пока туннель
+поднят.
 
 Без `-token` клиент берёт креды из подключённого в `main` провайдера (напр.
-решателя капчи) — его поставляешь ты.
+решателя капчи), который поставляет пользователь.
 
-## Android (Termux)
+## Android
 
-Termux — это Linux-окружение на Android, поэтому там запускается обычный Linux-бинарник;
-отдельное приложение не нужно. Всё чистое Go (без NDK).
-
-1. Собери клиент под телефон (на компе):
-   ```sh
-   ./scripts/build.sh android   # → dist/turnvpn-client-android-arm64 (+ -arm для старых)
-   ```
-2. Перекинь бинарник в Termux (scp/облако/кабель), дай права `chmod +x`, запусти как на компе:
-   ```sh
-   TURNVPN_SECRET='<секрет>' ./turnvpn-client-android-arm64 \
-     -peer <IP_VPS>:56000 -vk-link <токен> -tunnels 2
-   ```
-3. Клиент поднимет SOCKS5 на `127.0.0.1:1080`. Чтобы пустить через него трафик, нужен
-   **SOCKS5-совместимый** путь на телефоне: браузер/приложение с поддержкой SOCKS5,
-   либо tun2socks/VPN-приложение, принимающее SOCKS5. Капчу решаешь в браузере телефона.
-
-**Нативное приложение (APK)** — в каталоге `android/` (Kotlin + `VpnService`, Go-ядро
-подключено через gomobile `.aar`: tun2socks читает tun → наш туннель). Сборка:
-
-```sh
-# 1. собрать Go-ядро в .aar (нужны Android SDK/NDK + gomobile)
-ANDROID_HOME=<путь к SDK> ./scripts/build.sh aar
-# 2. собрать APK
-cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
-```
-
-В приложении заполняешь VPS/секрет/ссылку/токен и жмёшь Connect. Оговорки: пока
-**только arm64**, **TCP-only** (включи на телефоне Private DNS / DoT, чтобы DNS шёл через
-туннель), на реальном устройстве ещё не обкатано.
+Нативное приложение **HolubVPN** (Kotlin + `VpnService`, Go-ядро через gomobile
+`.aar`: tun2socks читает tun → туннель) — в каталоге [`android/`](android/README.md):
+там сборка APK, запуск и оговорки. DNS идёт через туннель по TCP автоматически.
 
 ## Статус
 
 Vector 1 (TURN-реле + DTLS + SOCKS5) **работает end-to-end**: реальный HTTPS-браузинг
-выходит через VPS по whitelisted-инфраструктуре VK, с пулом туннелей и проактивным
-рефрешем кредов. Полная история — в `PLAN.md` и `LAB.md`, включая удалённый (в
-git-истории) ранний media-RTP подход.
+выходит через VPS по инфраструктуре VK из белых списков, с пулом туннелей и
+проактивным обновлением кредов. Полная история — в `PLAN.md` и `LAB.md`, включая
+удалённый (в git-истории) ранний media-RTP подход.
 
 ---
 
@@ -289,38 +267,11 @@ locally. Keep the browser call alive while the tunnel is up. Without `-token`,
 the client uses the credential provider wired in `main` (e.g. a captcha fetcher)
 — which you supply.
 
-## Android (Termux)
+## Android
 
-Termux is a Linux environment on Android, so it runs an ordinary Linux binary — no
-separate app and no NDK needed (everything is pure Go).
-
-1. Build the client for the phone (on your computer):
-   ```sh
-   ./scripts/build.sh android   # → dist/turnvpn-client-android-arm64 (+ -arm for old phones)
-   ```
-2. Copy the binary into Termux, `chmod +x` it, and run it as on desktop:
-   ```sh
-   TURNVPN_SECRET='<secret>' ./turnvpn-client-android-arm64 \
-     -peer <VPS_IP>:56000 -vk-link <token> -tunnels 2
-   ```
-3. The client exposes SOCKS5 on `127.0.0.1:1080`. To route traffic through it you need
-   a **SOCKS5-capable** path on the phone: a browser/app that supports SOCKS5, or a
-   tun2socks / VPN app that accepts a SOCKS5 upstream. Solve the captcha in the phone's
-   browser.
-
-**Native app (APK)** — in the `android/` directory (Kotlin + `VpnService`, with the Go
-core bound through a gomobile `.aar`: tun2socks reads the tun → our tunnel). Build:
-
-```sh
-# 1. build the Go core into an .aar (needs the Android SDK/NDK + gomobile)
-ANDROID_HOME=<path to SDK> ./scripts/build.sh aar
-# 2. build the APK
-cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
-```
-
-Fill in VPS/secret/link/token in the app and tap Connect. Caveats: **arm64 only**,
-**TCP only** (enable Private DNS / DoT on the device so DNS rides the tunnel), and not
-yet tested on a real device.
+The native Android app **HolubVPN** (Kotlin + `VpnService`, Go core bound through a
+gomobile `.aar`: tun2socks reads the tun → our tunnel) lives in
+[`android/`](android/README.md), with its own build & run notes.
 
 ## Status
 
