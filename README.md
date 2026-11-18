@@ -146,9 +146,19 @@ Termux — это Linux-окружение на Android, поэтому там �
    **SOCKS5-совместимый** путь на телефоне: браузер/приложение с поддержкой SOCKS5,
    либо tun2socks/VPN-приложение, принимающее SOCKS5. Капчу решаешь в браузере телефона.
 
-> Полноценное **нативное приложение** (Kotlin + `VpnService`, чтобы гнать **весь** трафик
-> телефона без Termux) — отдельная задача (Stage 10 в `PLAN.md`): нужен Android SDK/NDK и
-> tun2socks/gomobile. Termux-путь работает уже сейчас.
+**Нативное приложение (APK)** — в каталоге `android/` (Kotlin + `VpnService`, Go-ядро
+подключено через gomobile `.aar`: tun2socks читает tun → наш туннель). Сборка:
+
+```sh
+# 1. собрать Go-ядро в .aar (нужны Android SDK/NDK + gomobile)
+ANDROID_HOME=<путь к SDK> ./scripts/build.sh aar
+# 2. собрать APK
+cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
+```
+
+В приложении заполняешь VPS/секрет/ссылку/токен и жмёшь Connect. Оговорки: пока
+**только arm64**, **TCP-only** (включи на телефоне Private DNS / DoT, чтобы DNS шёл через
+туннель), на реальном устройстве ещё не обкатано.
 
 ## Статус
 
@@ -298,9 +308,19 @@ separate app and no NDK needed (everything is pure Go).
    tun2socks / VPN app that accepts a SOCKS5 upstream. Solve the captcha in the phone's
    browser.
 
-> A full **native app** (Kotlin + `VpnService`, to route the whole device without
-> Termux) is a separate task (Stage 10 in `PLAN.md`): it needs the Android SDK/NDK and
-> tun2socks/gomobile. The Termux path already works today.
+**Native app (APK)** — in the `android/` directory (Kotlin + `VpnService`, with the Go
+core bound through a gomobile `.aar`: tun2socks reads the tun → our tunnel). Build:
+
+```sh
+# 1. build the Go core into an .aar (needs the Android SDK/NDK + gomobile)
+ANDROID_HOME=<path to SDK> ./scripts/build.sh aar
+# 2. build the APK
+cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
+```
+
+Fill in VPS/secret/link/token in the app and tap Connect. Caveats: **arm64 only**,
+**TCP only** (enable Private DNS / DoT on the device so DNS rides the tunnel), and not
+yet tested on a real device.
 
 ## Status
 

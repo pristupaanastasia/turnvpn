@@ -144,8 +144,11 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
       Go-клиент под `linux/arm64` (+ `arm`), запускается в **Termux** как на компе
       (SOCKS5 на `127.0.0.1:1080`). Капчу решает человек в браузере телефона. Доки — в
       `README.md`. Осталось: удобный SOCKS5→tun маршрут на телефоне (tun2socks).
-- [ ] **Полный путь:** `gomobile` → `.aar` из нашего клиента + тонкий Kotlin-UI с
-      `VpnService`, либо нативная реализация. Самый трудоёмкий вариант.
+- [x] **Полный путь — СОБРАН (APK):** `mobile/` (gomobile-биндинг) = `vpntun` (туннель
+      как Dialer) + `xjasonlyu/tun2socks`; `./scripts/build.sh aar` → `.aar`. Приложение
+      `android/` (Kotlin + `VpnService`) собирается в APK (`./gradlew assembleDebug`).
+      Оговорки: arm64-only, TCP-only (DNS через Private DNS/DoT), на устройстве не обкатано.
+- [ ] Обкатать APK на реальном устройстве; добавить UDP (Stage 7) для полноценного DNS/QUIC.
 
 ---
 

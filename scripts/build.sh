@@ -19,6 +19,19 @@ build() { # os arch goarm out pkg
 }
 
 case "${1:-all}" in
+aar)
+	# Build the gomobile .aar (Go VPN core) for the native Android app.
+	# Requires: gomobile (go install golang.org/x/mobile/cmd/gomobile@latest),
+	# ANDROID_HOME (SDK) and an installed NDK. -checklinkname=0 works around
+	# github.com/wlynxg/anet's net.zoneCache linkname (gomobile + Go 1.23+).
+	command -v gomobile >/dev/null || { echo "gomobile not found: go install golang.org/x/mobile/cmd/gomobile@latest" >&2; exit 1; }
+	: "${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
+	mkdir -p android/app/libs
+	gomobile bind -target=android/arm64 -androidapi 21 -javapkg com.turnvpn \
+		-ldflags="-checklinkname=0" -o android/app/libs/turnvpn.aar ./mobile
+	echo "done -> android/app/libs/turnvpn.aar"
+	exit 0
+	;;
 android)
 	build linux arm64 "" turnvpn-client-android-arm64 ./cmd/client
 	build linux arm 7 turnvpn-client-android-arm ./cmd/client
@@ -30,7 +43,7 @@ all)
 	build linux arm 7 turnvpn-client-android-arm ./cmd/client
 	;;
 *)
-	echo "usage: $0 [all|android]" >&2
+	echo "usage: $0 [all|android|aar]" >&2
 	exit 2
 	;;
 esac
