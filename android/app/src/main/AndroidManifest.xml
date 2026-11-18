@@ -9,7 +9,7 @@
         android:allowBackup="true"
         android:label="turnvpn"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar">
+        android:theme="@style/Theme.Turnvpn">
 
         <activity
             android:name=".MainActivity"

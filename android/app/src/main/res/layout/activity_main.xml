@@ -1,75 +1,148 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:paddingHorizontal="24dp"
+        android:paddingTop="40dp"
+        android:paddingBottom="32dp">
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:paddingBottom="12dp"
             android:text="turnvpn"
-            android:textSize="24sp"
-            android:textStyle="bold" />
+            android:textColor="@color/onDark"
+            android:textSize="30sp"
+            android:textStyle="bold"
+            android:letterSpacing="-0.02" />
 
-        <EditText
-            android:id="@+id/peer"
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="28dp"
+            android:text="тоннель через whitelisted TURN VK"
+            android:textColor="@color/muted"
+            android:textSize="14sp" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="VPS host:port (e.g. 1.2.3.4:56000)"
-            android:inputType="text" />
+            android:layout_marginBottom="14dp"
+            android:hint="VPS host:port"
+            app:boxCornerRadiusTopStart="14dp"
+            app:boxCornerRadiusTopEnd="14dp"
+            app:boxCornerRadiusBottomStart="14dp"
+            app:boxCornerRadiusBottomEnd="14dp">
 
-        <EditText
-            android:id="@+id/secret"
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/peer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="shared secret (TURNVPN_SECRET)"
-            android:inputType="textPassword" />
+            android:layout_marginBottom="14dp"
+            android:hint="shared secret"
+            app:boxCornerRadiusTopStart="14dp"
+            app:boxCornerRadiusTopEnd="14dp"
+            app:boxCornerRadiusBottomStart="14dp"
+            app:boxCornerRadiusBottomEnd="14dp"
+            app:endIconMode="password_toggle">
 
-        <EditText
-            android:id="@+id/link"
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/secret"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textPassword"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginBottom="14dp"
             android:hint="VK call link token"
-            android:inputType="text" />
+            app:boxCornerRadiusTopStart="14dp"
+            app:boxCornerRadiusTopEnd="14dp"
+            app:boxCornerRadiusBottomStart="14dp"
+            app:boxCornerRadiusBottomEnd="14dp">
 
-        <EditText
-            android:id="@+id/token"
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/link"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="call token (filled by Get token, or paste manually)"
-            android:inputType="text" />
+            android:layout_marginBottom="8dp"
+            android:hint="call token"
+            app:helperText="заполнится после «Get token»"
+            app:boxCornerRadiusTopStart="14dp"
+            app:boxCornerRadiusTopEnd="14dp"
+            app:boxCornerRadiusBottomStart="14dp"
+            app:boxCornerRadiusBottomEnd="14dp">
 
-        <Button
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/token"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/getToken"
+            style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="Get token (open call, solve captcha)" />
+            android:layout_height="56dp"
+            android:layout_marginTop="12dp"
+            android:text="Get token — open call, solve captcha"
+            app:cornerRadius="16dp" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/connect"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Connect" />
+            android:layout_height="56dp"
+            android:layout_marginTop="10dp"
+            android:text="Connect"
+            android:textStyle="bold"
+            app:cornerRadius="16dp" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/disconnect"
+            style="@style/Widget.Material3.Button.TextButton"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="52dp"
+            android:layout_marginTop="2dp"
             android:text="Disconnect" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="TCP only. Enable Private DNS (DoT) on the device so DNS rides the tunnel. Keep the browser VK call alive."
+            android:layout_marginTop="20dp"
+            android:lineSpacingExtra="2dp"
+            android:text="TCP only. Включи Private DNS (DoT), чтобы DNS шёл через тоннель. Держи браузерный звонок живым."
+            android:textColor="@color/muted"
             android:textSize="12sp" />
     </LinearLayout>
 </ScrollView>
