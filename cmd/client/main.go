@@ -119,16 +119,23 @@ func main() {
 
 // pool holds several tunnels and hands them out round-robin, so concurrent SOCKS
 // connections spread across independent TURN allocations (more throughput, and one
-// dead tunnel doesn't stall the others). Each tunnel self-heals on its next use.
+// dead tunnel doesn't stall the others). Each tunnel runs its own background manager
+// that keeps it alive and proactively refreshes its credentials.
 type pool struct {
 	tunnels []*tunnel
 	next    atomic.Uint32
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 func newPool(cfg config, peerAddr *net.UDPAddr, creds CredsFunc, n int) *pool {
-	p := &pool{tunnels: make([]*tunnel, n)}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &pool{cancel: cancel, tunnels: make([]*tunnel, n)}
 	for i := range p.tunnels {
-		p.tunnels[i] = &tunnel{cfg: cfg, peerAddr: peerAddr, creds: creds, streamID: i}
+		t := &tunnel{cfg: cfg, peerAddr: peerAddr, creds: creds, streamID: i, ready: make(chan struct{})}
+		p.tunnels[i] = t
+		p.wg.Add(1)
+		go func(t *tunnel) { defer p.wg.Done(); t.run(ctx) }(t)
 	}
 	return p
 }
@@ -140,9 +147,8 @@ func (p *pool) pick() *tunnel {
 }
 
 func (p *pool) close() {
-	for _, t := range p.tunnels {
-		t.close()
-	}
+	p.cancel()
+	p.wg.Wait()
 }
 
 // serveLocal handles one local SOCKS5 connection: negotiate the target, open a
@@ -162,7 +168,7 @@ func serveLocal(t *tunnel, c net.Conn) {
 	}
 	stream, err := sess.OpenStream()
 	if err != nil {
-		t.markDead(sess) // force re-establish on the next request
+		// Session likely just died; its manager goroutine will reconnect it.
 		log.Printf("client: open stream: %v", err)
 		return
 	}
@@ -174,59 +180,123 @@ func serveLocal(t *tunnel, c net.Conn) {
 	pipe(c, stream)
 }
 
-// tunnel holds the current smux session and lazily (re)establishes it. One tunnel is
-// a single DTLS/KCP/smux session over one TURN allocation; a pool holds several.
+// Tunnel lifetime tuning. TURN credentials live ~10 min, so refresh well before
+// that; keep a replaced session alive briefly so in-flight streams can finish.
+const (
+	tunnelTTL   = 8 * time.Minute
+	retireGrace = 90 * time.Second
+)
+
+// sessRef bundles a live smux session with the resources that must be closed to tear
+// the whole tunnel down (TURN client, relay allocation, DTLS conn).
+type sessRef struct {
+	sess    *smux.Session
+	closers []io.Closer
+}
+
+func (r *sessRef) teardown() {
+	if r == nil {
+		return
+	}
+	if r.sess != nil {
+		_ = r.sess.Close()
+	}
+	for i := len(r.closers) - 1; i >= 0; i-- {
+		_ = r.closers[i].Close()
+	}
+}
+
+// tunnel is a single DTLS/KCP/smux session over one TURN allocation, kept alive by a
+// background run() goroutine that proactively refreshes it before its credentials
+// expire. A pool holds several. get() hands out the current live session.
 type tunnel struct {
 	cfg      config
 	peerAddr *net.UDPAddr
 	creds    CredsFunc // pluggable credential acquisition; see CredsFunc
 	streamID int       // identifies this tunnel to creds (for cred-cache sharding)
 
-	mu      sync.Mutex
-	sess    *smux.Session
-	closers []io.Closer
+	mu        sync.RWMutex
+	cur       *sessRef
+	ready     chan struct{} // closed once cur is first set
+	readyOnce sync.Once
 }
 
-// get returns a live session, establishing or re-establishing it if needed.
+// run maintains the tunnel for ctx's lifetime: (re)establish a session, serve it
+// until the refresh TTL elapses or it dies, then replace it — retiring the previous
+// session after a grace period so active streams are not cut mid-transfer.
+func (t *tunnel) run(ctx context.Context) {
+	backoff := time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		sess, closers, err := t.establish()
+		if err != nil {
+			log.Printf("client: tunnel %d establish: %v (retry in %s)", t.streamID, err, backoff)
+			if !sleepCtx(ctx, backoff) {
+				return
+			}
+			backoff = minDur(2*backoff, 30*time.Second)
+			continue
+		}
+		backoff = time.Second
+		ref := &sessRef{sess: sess, closers: closers}
+		t.setCur(ref)
+		log.Printf("client: tunnel %d up (relay %s)", t.streamID, sess.LocalAddr())
+
+		timer := time.NewTimer(tunnelTTL)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			ref.teardown()
+			return
+		case <-timer.C:
+			// Proactive refresh: the current session is still healthy, so retire it
+			// with grace while the loop brings up a fresh one.
+			go retire(ref, retireGrace)
+		case <-sess.CloseChan():
+			timer.Stop()
+			log.Printf("client: tunnel %d dropped, reconnecting", t.streamID)
+			go retire(ref, 0) // already dead; just release resources
+		}
+	}
+}
+
+// setCur swaps in a new current session and signals readiness on the first one.
+func (t *tunnel) setCur(ref *sessRef) {
+	t.mu.Lock()
+	t.cur = ref
+	t.mu.Unlock()
+	t.readyOnce.Do(func() { close(t.ready) })
+}
+
+// get returns the current live session, waiting for the first establish if needed.
 func (t *tunnel) get() (*smux.Session, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.sess != nil && !t.sess.IsClosed() {
-		return t.sess, nil
+	select {
+	case <-t.ready:
+	case <-time.After(45 * time.Second):
+		return nil, fmt.Errorf("tunnel %d not ready", t.streamID)
 	}
-	t.teardownLocked()
-	sess, closers, err := t.establish()
-	if err != nil {
-		return nil, err
+	t.mu.RLock()
+	cur := t.cur
+	t.mu.RUnlock()
+	if cur == nil || cur.sess.IsClosed() {
+		return nil, fmt.Errorf("tunnel %d unavailable", t.streamID)
 	}
-	t.sess, t.closers = sess, closers
-	return sess, nil
+	return cur.sess, nil
 }
 
-// markDead closes the session if it is still the current one, so get() rebuilds.
-func (t *tunnel) markDead(sess *smux.Session) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.sess == sess && t.sess != nil {
-		_ = t.sess.Close()
+// retire closes a replaced session, but first lets its in-flight streams drain for up
+// to grace (checking a few times a second). A grace of 0 tears down immediately.
+func retire(ref *sessRef, grace time.Duration) {
+	deadline := time.Now().Add(grace)
+	for grace > 0 && time.Now().Before(deadline) {
+		if ref.sess.IsClosed() || ref.sess.NumStreams() == 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-}
-
-func (t *tunnel) teardownLocked() {
-	if t.sess != nil {
-		_ = t.sess.Close()
-		t.sess = nil
-	}
-	for i := len(t.closers) - 1; i >= 0; i-- {
-		_ = t.closers[i].Close()
-	}
-	t.closers = nil
-}
-
-func (t *tunnel) close() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.teardownLocked()
+	ref.teardown()
 }
 
 // establish resolves fresh TURN creds (via the pluggable t.creds), allocates a relay,
@@ -359,4 +429,23 @@ func closeAll(cs []io.Closer) {
 	for i := len(cs) - 1; i >= 0; i-- {
 		_ = cs[i].Close()
 	}
+}
+
+// sleepCtx waits for d, returning false if ctx is cancelled first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func minDur(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
