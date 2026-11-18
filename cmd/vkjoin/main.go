@@ -186,7 +186,7 @@ func resolveCallToken(ctx context.Context, cfg config) (string, error) {
 			return "", fmt.Errorf("get anonymous access token: %w", err)
 		}
 		access = a
-		log.Printf("obtained anonymous access token (experimental get_anonym_token)")
+		log.Printf("obtained anonymous access token")
 	}
 	// Retry politely on transient flood control; a captcha returns immediately
 	// (it must be solved by a human in a browser, never retried away).

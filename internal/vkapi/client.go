@@ -254,48 +254,46 @@ func (c *Client) GetCallTokenRetry(ctx context.Context, accessToken, joinLink, n
 	return "", errors.New("vkapi: GetCallTokenRetry exhausted attempts")
 }
 
-// GetAnonymToken obtains an anonymous VK access token via the login service's
-// get_anonym_token method, using the public web client id/secret.
-//
-// EXPERIMENTAL: the request shape (the login.vk.ru endpoint/act and parameter
-// encoding) is taken from the known constants and VK's login conventions, but the
-// exact form lives in a VK login module not yet captured. Verify it against a real
-// get_anonym_token call (capture one from a fresh, cookie-cleared guest join); if
-// it differs, only the endpoint/params here change. Prefer supplying a captured
-// access token to GetCallToken until this is confirmed.
+// GetAnonymToken obtains an anonymous VK access token from the login service:
+// POST https://login.vk.ru/?act=get_anonym_token with the public web client
+// id/secret. The token is a JWT (prefixed "anonym.") that GetCallToken then
+// exchanges for the per-call guest token. Form confirmed against the live
+// endpoint (2026-11-18).
 func (c *Client) GetAnonymToken(ctx context.Context) (string, error) {
+	// act goes in the query; the credentials go in the body.
+	endpoint := c.loginBase() + "/?act=get_anonym_token"
 	form := url.Values{
-		"act":           {"get_anonym_token"},
 		"client_id":     {WebClientID},
 		"client_secret": {AnonClientSecret},
 		"token_type":    {AnonTokenType},
 		"version":       {AnonTokenVersion},
 	}
-	data, err := c.postForm(ctx, c.loginBase()+"/", form)
+	data, err := c.postForm(ctx, endpoint, form)
 	if err != nil {
 		return "", err
 	}
+	// Success: {"type":"okay","data":{"access_token":"anonym.<jwt>",...}}.
 	var env struct {
-		AccessToken string `json:"access_token"`
-		Response    struct {
+		Type string `json:"type"`
+		Data struct {
 			AccessToken string `json:"access_token"`
-		} `json:"response"`
-		// error can be an OAuth string ("invalid_client") or a VK object.
+		} `json:"data"`
+		AccessToken      string          `json:"access_token"` // tolerated fallback
 		Error            json.RawMessage `json:"error"`
 		ErrorDescription string          `json:"error_description"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		return "", fmt.Errorf("vkapi: decode get_anonym_token: %w", err)
 	}
-	if len(env.Error) > 0 && string(env.Error) != "null" {
+	if env.Type == "error" || (len(env.Error) > 0 && string(env.Error) != "null") {
 		return "", anonTokenError(env.Error, env.ErrorDescription)
 	}
-	tok := env.AccessToken
+	tok := env.Data.AccessToken
 	if tok == "" {
-		tok = env.Response.AccessToken
+		tok = env.AccessToken
 	}
 	if tok == "" {
-		return "", fmt.Errorf("vkapi: get_anonym_token returned no access_token (endpoint form may need verifying)")
+		return "", fmt.Errorf("vkapi: get_anonym_token: no access_token (type=%q)", env.Type)
 	}
 	return tok, nil
 }

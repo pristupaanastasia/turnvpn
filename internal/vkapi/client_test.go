@@ -158,12 +158,16 @@ func TestGetCallTokenNoToken(t *testing.T) {
 }
 
 func TestGetAnonymToken(t *testing.T) {
+	// Real shape is {"type":"okay","data":{"access_token":...}}; a top-level
+	// access_token is tolerated as a fallback.
 	for _, body := range []string{
+		`{"type":"okay","data":{"access_token":"ANON","expires":123}}`,
 		`{"access_token":"ANON"}`,
-		`{"response":{"access_token":"ANON"}}`,
 	} {
+		var gotQuery url.Values
 		var gotForm map[string][]string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotQuery = r.URL.Query()
 			r.ParseForm()
 			gotForm = r.PostForm
 			w.Write([]byte(body))
@@ -177,7 +181,11 @@ func TestGetAnonymToken(t *testing.T) {
 		if tok != "ANON" {
 			t.Errorf("body %s: token = %q", body, tok)
 		}
-		if gotForm["act"][0] != "get_anonym_token" || gotForm["client_id"][0] != WebClientID {
+		// act is in the query; credentials in the body.
+		if gotQuery.Get("act") != "get_anonym_token" {
+			t.Errorf("query act = %q", gotQuery.Get("act"))
+		}
+		if gotForm["client_id"][0] != WebClientID || gotForm["client_secret"][0] != AnonClientSecret {
 			t.Errorf("form = %v", gotForm)
 		}
 	}
