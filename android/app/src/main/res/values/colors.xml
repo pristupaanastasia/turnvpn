@@ -7,4 +7,6 @@
     <color name="accentDim">#2A2742</color>
     <color name="onDark">#E7E9F0</color>
     <color name="muted">#868C9B</color>
+    <color name="connected">#34D399</color>
+    <color name="onConnected">#05261A</color>
 </resources>

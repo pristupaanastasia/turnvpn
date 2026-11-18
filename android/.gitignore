@@ -2,6 +2,6 @@
 /build/
 /app/build/
 /local.properties
-/app/libs/*.aar
+/app/libs/
 /captures/
 *.apk

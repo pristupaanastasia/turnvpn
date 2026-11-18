@@ -32,10 +32,18 @@ class CaptchaActivity : Activity() {
         web.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            // Ask for the desktop web client (the one whose fb.do flow we read).
+            // Ask for the desktop web client (the one whose fb.do flow we read; the
+            // mobile site redirects to the app and has no web call).
             userAgentString =
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+            // The desktop layout is wide; fit it to the screen and allow pinch-zoom
+            // so the join button and the captcha dialog are reachable in portrait.
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            builtInZoomControls = true
+            displayZoomControls = false
+            setSupportZoom(true)
         }
         web.addJavascriptInterface(Bridge(), "AndroidBridge")
         web.webViewClient = object : WebViewClient() {

@@ -27,11 +27,13 @@ class TurnvpnService : VpnService() {
             return START_NOT_STICKY
         }
         startForegroundNotif()
+        VpnState.set(VpnState.S.CONNECTING)
         Thread { startVpn(intent) }.start()
         return START_STICKY
     }
 
     private fun startVpn(intent: Intent) {
+        var goFd = -1
         try {
             val builder = Builder()
                 .setSession("turnvpn")
@@ -48,9 +50,15 @@ class TurnvpnService : VpnService() {
 
             val pfd = builder.establish() ?: throw IllegalStateException("establish() returned null")
             tun = pfd
+            // Hand Go an independent dup of the tun fd. Passing pfd.fd directly makes
+            // both the ParcelFileDescriptor and tun2socks claim ownership of the same
+            // fd, and Android's fdsan then aborts the whole process (on connect and on
+            // disconnect). A dup is a separate fd on the same tun: Go closes its fd, we
+            // close ours — no ownership clash.
+            goFd = pfd.dup().detachFd()
 
             Turnvpn.start(
-                pfd.fd.toLong(),
+                goFd.toLong(),
                 1500L,
                 intent.getStringExtra(EXTRA_PEER) ?: "",
                 intent.getStringExtra(EXTRA_SECRET) ?: "",
@@ -58,9 +66,19 @@ class TurnvpnService : VpnService() {
                 intent.getStringExtra(EXTRA_TOKEN) ?: "",
                 intent.getStringExtra(EXTRA_APPKEY) ?: DEFAULT_APPKEY,
             )
+            goFd = -1 // ownership handed to Go; the engine closes it on Stop()
             Log.i(TAG, "turnvpn started")
+            VpnState.set(VpnState.S.ON)
+            updateNotif("Connected")
         } catch (e: Exception) {
             Log.e(TAG, "start failed: ${e.message}", e)
+            // Go never adopted the dup (setup failed before the engine) — close it.
+            if (goFd >= 0) {
+                try {
+                    ParcelFileDescriptor.adoptFd(goFd).close()
+                } catch (_: Exception) {
+                }
+            }
             stopVpn()
         }
     }
@@ -75,6 +93,7 @@ class TurnvpnService : VpnService() {
         } catch (_: Exception) {
         }
         tun = null
+        VpnState.set(VpnState.S.OFF)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -93,12 +112,22 @@ class TurnvpnService : VpnService() {
             )
         }
         val notif: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("turnvpn")
+            .setContentTitle("HolubVPN")
             .setContentText("VPN active")
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setSmallIcon(R.drawable.ic_stat_turnvpn)
             .setOngoing(true)
             .build()
         startForeground(1, notif)
+    }
+
+    private fun updateNotif(text: String) {
+        val notif: Notification = NotificationCompat.Builder(this, "turnvpn")
+            .setContentTitle("HolubVPN")
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_stat_turnvpn)
+            .setOngoing(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(1, notif)
     }
 
     companion object {

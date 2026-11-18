@@ -17,7 +17,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="turnvpn"
+            android:text="HolubVPN"
             android:textColor="@color/onDark"
             android:textSize="30sp"
             android:textStyle="bold"
@@ -28,7 +28,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:layout_marginBottom="28dp"
-            android:text="тоннель через whitelisted TURN VK"
+            android:text="тоннель через TURN VK из белого списка"
             android:textColor="@color/muted"
             android:textSize="14sp" />
 
@@ -96,7 +96,7 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
             android:hint="call token"
-            app:helperText="заполнится после «Get token»"
+            app:helperText="заполнится после «Получить call token»"
             app:boxCornerRadiusTopStart="14dp"
             app:boxCornerRadiusTopEnd="14dp"
             app:boxCornerRadiusBottomStart="14dp"
@@ -116,7 +116,7 @@
             android:layout_width="match_parent"
             android:layout_height="56dp"
             android:layout_marginTop="12dp"
-            android:text="Get token — open call, solve captcha"
+            android:text="Получить call token"
             app:cornerRadius="16dp" />
 
         <com.google.android.material.button.MaterialButton
@@ -141,7 +141,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:lineSpacingExtra="2dp"
-            android:text="TCP only. Включи Private DNS (DoT), чтобы DNS шёл через тоннель. Держи браузерный звонок живым."
+            android:text="TCP-тоннель. DNS идёт через туннель автоматически; QUIC (UDP) падает на TCP. Держи браузерный звонок живым."
             android:textColor="@color/muted"
             android:textSize="12sp" />
     </LinearLayout>
