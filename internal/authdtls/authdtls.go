@@ -17,6 +17,7 @@ package authdtls
 
 import (
 	"crypto/sha256"
+	"fmt"
 
 	"github.com/pion/dtls/v3"
 )
@@ -35,10 +36,42 @@ func deriveKey(secret string) []byte {
 }
 
 // PSK returns a callback that supplies the pre-shared key derived from secret.
+// It ignores the peer identity — the single-secret mode where every client shares
+// one secret. For per-client identities with revocation, use a Keyring on the server.
 func PSK(secret string) dtls.PSKCallback {
 	key := deriveKey(secret)
 	return func([]byte) ([]byte, error) { return key, nil }
 }
 
-// IdentityHint returns the PSK identity hint bytes.
+// Key is the 32-byte PSK derived from a human secret.
+func Key(secret string) []byte { return deriveKey(secret) }
+
+// IdentityHint returns the default PSK identity bytes (used when a client has no
+// explicit identity, so single-secret deployments keep working).
 func IdentityHint() []byte { return []byte(identityHint) }
+
+// Keyring maps each client identity to its PSK key. The server authenticates every
+// client separately against it, so one client's secret can be revoked (removed)
+// without affecting the others, and a leaked client secret only exposes that client.
+type Keyring map[string][]byte
+
+// NewKeyring derives a keyring from identity -> secret pairs.
+func NewKeyring(secrets map[string]string) Keyring {
+	kr := make(Keyring, len(secrets))
+	for id, s := range secrets {
+		kr[id] = deriveKey(s)
+	}
+	return kr
+}
+
+// PSK returns a server-side callback that looks up the connecting client's identity
+// in the keyring. An unknown — or revoked — identity returns an error, which fails
+// the DTLS handshake, so the client cannot establish.
+func (kr Keyring) PSK() dtls.PSKCallback {
+	return func(id []byte) ([]byte, error) {
+		if key, ok := kr[string(id)]; ok {
+			return key, nil
+		}
+		return nil, fmt.Errorf("authdtls: unknown client identity %q", string(id))
+	}
+}

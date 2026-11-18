@@ -37,6 +37,7 @@ type CredsFunc func(ctx context.Context) (user, pass, addr string, err error)
 type Config struct {
 	PeerAddr string
 	Secret   string
+	Identity string // PSK identity this client presents; "" uses the default (single-secret mode)
 	Creds    CredsFunc
 	Logf     func(string, ...any)
 }
@@ -249,9 +250,13 @@ func (d *Dialer) establish() (*smux.Session, *mux.Lane, []io.Closer, error) {
 		return fail(fmt.Errorf("permission: %w", err))
 	}
 
+	identity := authdtls.IdentityHint()
+	if d.cfg.Identity != "" {
+		identity = []byte(d.cfg.Identity)
+	}
 	dconn, err := dtls.ClientWithOptions(relay, d.peerAddr,
 		dtls.WithPSK(authdtls.PSK(d.cfg.Secret)),
-		dtls.WithPSKIdentityHint(authdtls.IdentityHint()),
+		dtls.WithPSKIdentityHint(identity),
 		dtls.WithCipherSuites(authdtls.Cipher),
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
 	)

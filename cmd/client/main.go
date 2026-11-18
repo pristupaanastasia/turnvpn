@@ -43,7 +43,7 @@ import (
 )
 
 type config struct {
-	listen, peer, vkLink, token, appKey, secret string
+	listen, peer, vkLink, token, appKey, secret, identity string
 }
 
 // CredsFunc resolves the call's TURN credentials for a (re)connect: given the join
@@ -72,6 +72,7 @@ func main() {
 	token := flag.String("token", "", "VK per-call guest token (a.token); or env TURN_CALL_TOKEN")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
 	secret := flag.String("secret", "", "shared secret for mutual DTLS auth, must match the server (or env TURNVPN_SECRET); REQUIRED")
+	identity := flag.String("identity", "", "client PSK identity for a server keyring (optional; empty = single-secret mode)")
 	tunnels := flag.Int("tunnels", 2, "number of parallel tunnels (streams are round-robined across them for throughput)")
 	refresh := flag.Duration("refresh", tunnelTTL, "proactively refresh each tunnel's session after this interval (before its ~10m creds expire)")
 	flag.Parse()
@@ -92,7 +93,7 @@ func main() {
 	if *secret == "" {
 		log.Fatal("client: -secret (or env TURNVPN_SECRET) is required and must match the server")
 	}
-	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey, secret: *secret}
+	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey, secret: *secret, identity: *identity}
 
 	peerAddr, err := net.ResolveUDPAddr("udp4", cfg.peer)
 	if err != nil {
@@ -367,9 +368,13 @@ func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
 	// Mutual PSK authentication: the handshake only completes if the server holds
 	// the same secret, which authenticates the exit (no MITM) and keeps forward
 	// secrecy via the ECDHE-PSK suite.
+	pskIdentity := authdtls.IdentityHint()
+	if cfg.identity != "" {
+		pskIdentity = []byte(cfg.identity)
+	}
 	dconn, err := dtls.ClientWithOptions(relay, peerAddr,
 		dtls.WithPSK(authdtls.PSK(cfg.secret)),
-		dtls.WithPSKIdentityHint(authdtls.IdentityHint()),
+		dtls.WithPSKIdentityHint(pskIdentity),
 		dtls.WithCipherSuites(authdtls.Cipher),
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
 	)

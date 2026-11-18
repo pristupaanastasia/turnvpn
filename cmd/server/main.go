@@ -8,11 +8,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/pion/dtls/v3"
@@ -24,14 +27,33 @@ import (
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "UDP address to listen on for DTLS")
-	secret := flag.String("secret", "", "shared secret for mutual DTLS auth (or env TURNVPN_SECRET); REQUIRED")
+	secret := flag.String("secret", "", "single shared secret for mutual DTLS auth (or env TURNVPN_SECRET)")
+	keyringPath := flag.String("keyring", "", "path to a per-client keyring file ('identity secret' per line; or env TURNVPN_KEYRING) — enables per-client auth with revocation")
 	flag.Parse()
 
 	if *secret == "" {
 		*secret = os.Getenv("TURNVPN_SECRET")
 	}
-	if *secret == "" {
-		log.Fatal("server: -secret (or env TURNVPN_SECRET) is required — it authenticates clients so the exit is not an open proxy")
+	if *keyringPath == "" {
+		*keyringPath = os.Getenv("TURNVPN_KEYRING")
+	}
+
+	// Pick the authentication mode: a per-client keyring (revocable identities) takes
+	// precedence; otherwise a single shared secret. One of them is required so the
+	// exit is never an open proxy.
+	var psk dtls.PSKCallback
+	switch {
+	case *keyringPath != "":
+		kr, err := loadKeyring(*keyringPath)
+		if err != nil {
+			log.Fatalf("server: keyring %q: %v", *keyringPath, err)
+		}
+		log.Printf("server: per-client keyring loaded (%d identities)", len(kr))
+		psk = kr.PSK()
+	case *secret != "":
+		psk = authdtls.PSK(*secret)
+	default:
+		log.Fatal("server: provide -secret/TURNVPN_SECRET or -keyring/TURNVPN_KEYRING — auth keeps the exit from being an open proxy")
 	}
 
 	laddr, err := net.ResolveUDPAddr("udp", *listen)
@@ -39,10 +61,10 @@ func main() {
 		log.Fatalf("server: resolve %q: %v", *listen, err)
 	}
 
-	// Mutual PSK authentication: only a client holding the same secret can complete
-	// the DTLS handshake, so the exit is not an open proxy and cannot be MITM'd.
+	// Mutual PSK authentication: only a client holding a valid secret/identity can
+	// complete the DTLS handshake, so the exit is not an open proxy and cannot be MITM'd.
 	ln, err := dtls.ListenWithOptions("udp", laddr,
-		dtls.WithPSK(authdtls.PSK(*secret)),
+		dtls.WithPSK(psk),
 		dtls.WithPSKIdentityHint(authdtls.IdentityHint()),
 		dtls.WithCipherSuites(authdtls.Cipher),
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
@@ -89,4 +111,39 @@ func serve(conn net.Conn) {
 
 	tunnel.Serve(sess, lane, log.Printf)
 	log.Printf("server: tunnel down from %s", ra)
+}
+
+// loadKeyring parses a keyring file: one "identity secret" per line, blank lines and
+// '#' comments ignored. Revoking a client is removing its line and restarting.
+func loadKeyring(path string) (authdtls.Keyring, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	secrets := make(map[string]string)
+	sc := bufio.NewScanner(f)
+	for n := 1; sc.Scan(); n++ {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("line %d: expected 'identity secret'", n)
+		}
+		id := fields[0]
+		if _, dup := secrets[id]; dup {
+			return nil, fmt.Errorf("line %d: duplicate identity %q", n, id)
+		}
+		secrets[id] = fields[1]
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if len(secrets) == 0 {
+		return nil, fmt.Errorf("keyring has no identities")
+	}
+	return authdtls.NewKeyring(secrets), nil
 }
