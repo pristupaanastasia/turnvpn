@@ -95,7 +95,7 @@ func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("vkapi: POST %s: %w", redactEndpoint(endpoint), err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
@@ -170,14 +170,15 @@ func (c *Client) GetAnonymToken(ctx context.Context) (string, error) {
 		Response    struct {
 			AccessToken string `json:"access_token"`
 		} `json:"response"`
-		Error     *vkError `json:"error"`
-		ErrorText string   `json:"error_type"`
+		// error can be an OAuth string ("invalid_client") or a VK object.
+		Error            json.RawMessage `json:"error"`
+		ErrorDescription string          `json:"error_description"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		return "", fmt.Errorf("vkapi: decode get_anonym_token: %w", err)
 	}
-	if env.Error != nil {
-		return "", env.Error
+	if len(env.Error) > 0 && string(env.Error) != "null" {
+		return "", anonTokenError(env.Error, env.ErrorDescription)
 	}
 	tok := env.AccessToken
 	if tok == "" {
@@ -187,6 +188,23 @@ func (c *Client) GetAnonymToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("vkapi: get_anonym_token returned no access_token (endpoint form may need verifying)")
 	}
 	return tok, nil
+}
+
+// anonTokenError turns the login service's error field — an OAuth-style string
+// ("invalid_client") or a VK error object — into a readable error.
+func anonTokenError(raw json.RawMessage, desc string) error {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if desc != "" {
+			return fmt.Errorf("vkapi: get_anonym_token: %s: %s", s, desc)
+		}
+		return fmt.Errorf("vkapi: get_anonym_token: %s", s)
+	}
+	var ve vkError
+	if json.Unmarshal(raw, &ve) == nil && ve.Code != 0 {
+		return &ve
+	}
+	return fmt.Errorf("vkapi: get_anonym_token error: %s", string(raw))
 }
 
 // redactEndpoint strips any query from an endpoint for safe logging.

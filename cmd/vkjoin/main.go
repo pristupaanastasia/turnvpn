@@ -32,7 +32,7 @@ const httpTimeout = 30 * time.Second
 
 func main() {
 	link := flag.String("link", "", "join link token from vk.ru/call/join/<token> (required)")
-	token := flag.String("token", "", "VK guest call token (auth_token/anonymToken); if empty, derive it")
+	token := flag.String("token", "", "VK guest call token; takes precedence, else -access-token, else -auto-token")
 	accessToken := flag.String("access-token", "", "VK anonymous access token; with -link derives the call token (or env VKJOIN_ACCESS_TOKEN)")
 	autoToken := flag.Bool("auto-token", false, "obtain the anonymous access token automatically (experimental get_anonym_token)")
 	name := flag.String("name", "probe", "guest display name")

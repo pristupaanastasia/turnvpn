@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -96,6 +97,21 @@ func TestGetAnonymToken(t *testing.T) {
 		if gotForm["act"][0] != "get_anonym_token" || gotForm["client_id"][0] != WebClientID {
 			t.Errorf("form = %v", gotForm)
 		}
+	}
+}
+
+func TestGetAnonymTokenOAuthError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"error":"invalid_client","error_description":"bad secret"}`))
+	}))
+	defer srv.Close()
+	c := &Client{LoginBase: srv.URL}
+	_, err := c.GetAnonymToken(context.Background())
+	if err == nil {
+		t.Fatal("expected OAuth error")
+	}
+	if got := err.Error(); !strings.Contains(got, "invalid_client") || !strings.Contains(got, "bad secret") {
+		t.Errorf("error = %q, want it to mention invalid_client and the description", got)
 	}
 }
 
