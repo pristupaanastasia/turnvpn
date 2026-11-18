@@ -4,8 +4,8 @@
 чтобы машина в сети «только по белому списку» («суверенный режим») могла
 достучаться до открытого интернета. Для сети трафик выглядит как WebRTC-звонок.
 
-> **Личный исследовательский / учебный проект.** Побочный эффект — передача данных
-> в условиях включённых белых списков со скоростью до **~25 Мбит/с**.
+> **Личный исследовательский / учебный проект.** Возможность передавать данные
+> в условиях включённых белых списков со скоростью до **~25 Мбит/с** — побочный эффект.
 
 ## Как это работает
 
@@ -142,8 +142,8 @@ calls, so a machine stuck in a whitelist-only network ("суверенный р�
 still reach the open internet. The traffic looks like a WebRTC call to the
 network.
 
-> **Personal research / educational project.** Side effect — moving data under
-> active whitelist conditions at up to **~25 Mbit/s**.
+> **Personal research / educational project.** The ability to move data under
+> active whitelist conditions at up to **~25 Mbit/s** is a side effect.
 
 ## How it works
 
