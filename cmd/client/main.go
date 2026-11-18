@@ -42,6 +42,25 @@ type config struct {
 	listen, peer, vkLink, token, appKey string
 }
 
+// CredsFunc resolves the call's TURN credentials for a (re)connect: given the join
+// link and a stream/connection id it returns username, password and the TURN server
+// "host:port". This is the seam for pluggable credential acquisition — the default
+// (defaultCreds) uses a human-captured call token, but any implementation matching
+// this signature can be assigned to tunnel.creds instead, including one that solves
+// the captcha automatically (that solver is not part of turnvpn; it is supplied by
+// the caller, e.g. from internal/captcha).
+type CredsFunc func(ctx context.Context, link string, streamID int) (user, pass, addr string, err error)
+
+// defaultCreds is the built-in CredsFunc: it derives turn_server from the VK call
+// using a call token already obtained out of band (human-in-the-loop; no captcha
+// solving here). streamID is ignored (one tunnel, no per-stream sharding).
+func defaultCreds(cfg config) CredsFunc {
+	return func(ctx context.Context, link string, _ int) (user, pass, addr string, err error) {
+		addr, user, pass, err = fetchTurnCreds(ctx, cfg.appKey, link, cfg.token)
+		return user, pass, addr, err
+	}
+}
+
 func main() {
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 listen address")
 	peer := flag.String("peer", "", "VPS exit host:port (running `server`)")
@@ -63,7 +82,9 @@ func main() {
 		log.Fatalf("client: resolve peer %q: %v", cfg.peer, err)
 	}
 
-	t := &tunnel{cfg: cfg, peerAddr: peerAddr}
+	t := &tunnel{cfg: cfg, peerAddr: peerAddr, creds: defaultCreds(cfg)}
+	// To use automatic credential acquisition (e.g. a captcha-solving fetcher that
+	// matches CredsFunc), assign it here instead:  t.creds = <yourCredsFunc>
 	defer t.close()
 
 	ln, err := net.Listen("tcp", cfg.listen)
@@ -116,6 +137,7 @@ func serveLocal(t *tunnel, c net.Conn) {
 type tunnel struct {
 	cfg      config
 	peerAddr *net.UDPAddr
+	creds    CredsFunc // pluggable credential acquisition; see CredsFunc
 
 	mu      sync.Mutex
 	sess    *smux.Session
@@ -130,7 +152,7 @@ func (t *tunnel) get() (*smux.Session, error) {
 		return t.sess, nil
 	}
 	t.teardownLocked()
-	sess, closers, err := establish(t.cfg, t.peerAddr)
+	sess, closers, err := t.establish()
 	if err != nil {
 		return nil, err
 	}
@@ -164,15 +186,17 @@ func (t *tunnel) close() {
 	t.teardownLocked()
 }
 
-// establish fetches fresh TURN creds, allocates a relay, DTLS-handshakes through it
-// to the VPS, and returns a smux client session plus the resources to close in LIFO.
-func establish(cfg config, peerAddr *net.UDPAddr) (*smux.Session, []io.Closer, error) {
+// establish resolves fresh TURN creds (via the pluggable t.creds), allocates a relay,
+// DTLS-handshakes through it to the VPS, and returns a smux client session plus the
+// resources to close in LIFO.
+func (t *tunnel) establish() (*smux.Session, []io.Closer, error) {
+	cfg, peerAddr := t.cfg, t.peerAddr
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	turnAddr, user, pass, err := fetchTurnCreds(ctx, cfg.appKey, cfg.vkLink, cfg.token)
+	user, pass, turnAddr, err := t.creds(ctx, cfg.vkLink, 0)
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetch creds: %w", err)
+		return nil, nil, fmt.Errorf("resolve creds: %w", err)
 	}
 	log.Printf("client: got turn_server %s", turnAddr)
 
