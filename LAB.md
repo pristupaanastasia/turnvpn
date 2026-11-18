@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-11-18 — Hardening: SSRF-guard, non-root сервер, ненадёжная дорожка для QUIC
+
+**Stage:** Hardening (P0.1/P0.2/P1.1) · **Verdict:** ✅ сделано, проверено вживую
+
+- **P0.1 SSRF:** `internal/tunnel/guard.go` — блок loopback/private/link-local/metadata
+  (`169.254.169.254`) для TCP и UDP; диал по проверенному IP (закрыт DNS-rebinding
+  TOCTOU). Тесты `TestTargetAllowedDefault`, `TestBlockedTargetRefused`.
+- **P0.2 non-root:** сервер под пользователем `turnvpn`, бинарник в `/usr/local/bin`,
+  секрет в `/etc/turnvpn-server.env` (600), hardened systemd-юнит
+  (NoNewPrivileges, ProtectSystem=strict, dropped caps).
+- **P1.1 unreliable lane:** `internal/mux/lane.go` — тег-демукс одной DTLS-conn на
+  **reliable** (KCP/smux) и **unreliable** (датаграммы per-flow). UDP теперь:
+  control-поток (target + flow-id) + датаграммы по lane → QUIC без head-of-line
+  blocking. Переписаны `tunnel` (реестр flow, handleUDP), `vpntun` (UDPFlow), `mobile`.
+  Тесты `TestLaneDatagramAndStream` (`-race`), `TestUDPRelay`.
+- **Evidence:** `go test ./...` зелёный; на эмуляторе `cloudflare-quic.com` → **HTTP/3**
+  через новый non-root сервер.
+- **Wire-change:** lane добавляет 1-байтный тег на все DTLS-датаграммы → со старой
+  версией несовместимо; сервер и APK выкачены вместе.
+- **Next:** per-client auth + revocation, секрет Android в Keystore, ротация
+  выходов, footprint-шейп.
+
 ## 2026-11-18 — Stage 7: UDP-реле поверх туннеля (сервер + mobile)
 
 **Stage:** Stage 7 (UDP) · **Verdict:** ✅ транспорт+сервер готовы, покрыты тестом;

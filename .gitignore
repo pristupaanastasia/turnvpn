@@ -21,3 +21,4 @@ vk-creds*.env
 /turnvpn-client
 /turnvpn-server
 /dist/
+/HARDENING.md
