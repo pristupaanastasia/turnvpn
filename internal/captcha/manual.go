@@ -175,8 +175,22 @@ func rewriteCaptchaHTML(html string, targetURL *neturl.URL) string {
     var localOrigin = %q;
     var upstreamOrigin = %q;
 
+    // st.vk.ru / st.vk.com serve the captcha bundle. Its webpack publicPath is
+    // derived from the script URL with the query stripped, so routing that
+    // script through /generic_proxy?proxy_url=... makes chunks load from
+    // localhost/chunks and 404 on id.vk.ru. Leave the static hosts alone.
+    function isDirectAsset(urlStr) {
+        var m = String(urlStr).match(/^(?:https?:)?\/\/([^\/?#]+)/i);
+        if (!m) return false;
+        var host = m[1].toLowerCase();
+        var colon = host.indexOf(':');
+        if (colon !== -1) host = host.slice(0, colon);
+        return host === 'st.vk.ru' || host === 'st.vk.com';
+    }
+
     function rewriteUrl(urlStr) {
         if (!urlStr || typeof urlStr !== 'string') return urlStr;
+        if (isDirectAsset(urlStr)) return urlStr;
         if (urlStr.indexOf(localOrigin) === 0) return urlStr;
         if (urlStr.indexOf(upstreamOrigin) === 0) return localOrigin + urlStr.slice(upstreamOrigin.length);
         if (urlStr.indexOf('//') === 0) {
@@ -376,12 +390,19 @@ func startCaptchaServer(srv *http.Server, logPrefix string) error {
 }
 
 // runCaptchaServerAndWait triggers the browser, and waiting gracefully for the solution token.
-func runCaptchaServerAndWait(handler http.Handler, captchaURL string, keyCh <-chan string, logPrefix string) (string, error) {
+func runCaptchaServerAndWait(ctx context.Context, handler http.Handler, captchaURL string, keyCh <-chan string, logPrefix string) (string, error) {
 	srv := &http.Server{Handler: handler}
 
 	if err := startCaptchaServer(srv, logPrefix); err != nil {
 		return "", err
 	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			log.Printf("%s: shutdown: %v", logPrefix, err)
+		}
+	}()
 
 	fmt.Println("\n==============================================")
 	fmt.Println("ACTION REQUIRED: MANUAL CAPTCHA SOLVING NEEDED")
@@ -391,15 +412,12 @@ func runCaptchaServerAndWait(handler http.Handler, captchaURL string, keyCh <-ch
 
 	openBrowser(captchaURL)
 
-	key := <-keyCh
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		return "", err
+	select {
+	case key := <-keyCh:
+		return key, nil
+	case <-ctx.Done():
+		return "", fmt.Errorf("manual captcha timed out: %w", ctx.Err())
 	}
-
-	return key, nil
 }
 
 // notifyKey pushes the key string to the given channel without blocking
@@ -412,7 +430,7 @@ func notifyKey(keyCh chan<- string, key string) {
 	}
 }
 
-func solveCaptchaViaHTTP(captchaImg string) (string, error) {
+func solveCaptchaViaHTTP(ctx context.Context, captchaImg string) (string, error) {
 	keyCh := make(chan string, 1)
 	mux := http.NewServeMux()
 
@@ -440,10 +458,10 @@ button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 		_, _ = fmt.Fprint(w, `<!DOCTYPE html><html><body><h2>Done!</h2></body></html>`)
 	})
 
-	return runCaptchaServerAndWait(mux, localCaptchaOrigin(), keyCh, "captcha HTTP server error")
+	return runCaptchaServerAndWait(ctx, mux, localCaptchaOrigin(), keyCh, "captcha HTTP server error")
 }
 
-func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string, error) {
+func solveCaptchaViaProxy(ctx context.Context, redirectURI string, dialer *dnsdialer.Dialer) (string, error) {
 	keyCh := make(chan string, 1)
 
 	targetURL, err := neturl.Parse(redirectURI)
@@ -578,7 +596,7 @@ func solveCaptchaViaProxy(redirectURI string, dialer *dnsdialer.Dialer) (string,
 		proxy.ServeHTTP(w, r)
 	})
 
-	return runCaptchaServerAndWait(mux, localCaptchaURLForTarget(targetURL), keyCh, "proxy HTTP server error")
+	return runCaptchaServerAndWait(ctx, mux, localCaptchaURLForTarget(targetURL), keyCh, "proxy HTTP server error")
 }
 
 func openBrowser(url string) {

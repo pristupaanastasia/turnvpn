@@ -272,6 +272,12 @@ type VkCaptchaError struct {
 	CaptchaAttempt          string
 }
 
+// captchaHumanOnly is true when VK issued a not-robot page (redirect_uri) and
+// did not attach a classic image challenge. That page is solved by a person.
+func captchaHumanOnly(e *VkCaptchaError) bool {
+	return e != nil && e.CaptchaImg == "" && e.RedirectURI != ""
+}
+
 func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	// Extract error_code
 	codeFloat, ok := errData["error_code"].(float64)
@@ -281,48 +287,40 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	}
 	code := int(codeFloat)
 
-	// Extract redirect_uri
-	RedirectURI, ok := errData["redirect_uri"].(string)
-	if !ok {
-		log.Printf("missing redirect_uri in captcha error data")
-		return nil
-	}
-
-	// Extract captcha_sid
-	captchaSid, ok := errData["captcha_sid"].(string)
-	if !ok {
-		// try numeric
-		if sidNum, ok2 := errData["captcha_sid"].(float64); ok2 {
-			captchaSid = fmt.Sprintf("%.0f", sidNum)
-		} else {
-			log.Printf("missing captcha_sid in captcha error data")
-			return nil
-		}
-	}
-
-	// Extract captcha_img
-	captchaImg, ok := errData["captcha_img"].(string)
-	if !ok {
-		log.Printf("missing captcha_img in captcha error data")
-		return nil
-	}
-
 	// Extract error_msg
-	errorMsg, ok := errData["error_msg"].(string)
-	if !ok {
-		log.Printf("missing error_msg in captcha error data")
+	errorMsg, _ := errData["error_msg"].(string)
+	captchaEnabled, _ := errData["is_enabled_captcha"].(bool)
+	if code != 14 && !captchaEnabled {
 		return nil
+	}
+
+	// redirect_uri is the current not-robot challenge. captcha_sid and
+	// captcha_img are absent on that response; they belong to the older
+	// image challenge and are optional.
+	redirectURI, _ := errData["redirect_uri"].(string)
+	captchaImg, _ := errData["captcha_img"].(string)
+	if redirectURI == "" && captchaImg == "" {
+		log.Printf("captcha error has neither redirect_uri nor captcha_img")
+		return nil
+	}
+
+	var captchaSid string
+	switch sid := errData["captcha_sid"].(type) {
+	case string:
+		captchaSid = sid
+	case float64:
+		captchaSid = fmt.Sprintf("%.0f", sid)
 	}
 
 	// Extract session token if redirect_uri present
 	var sessionToken string
-	if RedirectURI != "" {
-		if parsed, err := neturl.Parse(RedirectURI); err == nil {
-			sessionToken = parsed.Query().Get("session_token")
-		} else {
+	if redirectURI != "" {
+		parsed, err := neturl.Parse(redirectURI)
+		if err != nil {
 			log.Printf("failed to parse redirect_uri: %v", err)
 			return nil
 		}
+		sessionToken = parsed.Query().Get("session_token")
 	}
 
 	// Extract is_sound_captcha_available
@@ -353,7 +351,7 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 		ErrorMsg:                errorMsg,
 		CaptchaSid:              captchaSid,
 		CaptchaImg:              captchaImg,
-		RedirectURI:             RedirectURI,
+		RedirectURI:             redirectURI,
 		IsSoundCaptchaAvailable: isSound,
 		SessionToken:            sessionToken,
 		CaptchaTs:               captchaTs,
@@ -362,7 +360,7 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 }
 
 func (e *VkCaptchaError) IsCaptchaError() bool {
-	return e.ErrorCode == 14 && e.RedirectURI != "" && e.SessionToken != ""
+	return e.ErrorCode == 14 && (e.RedirectURI != "" || e.CaptchaImg != "")
 }
 
 func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, streamID int, client tlsclient.HttpClient, profile Profile, useSliderPOC bool) (string, error) {
@@ -902,7 +900,10 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
 			captchaErr := ParseVkCaptchaError(errObj)
 			if captchaErr != nil && captchaErr.IsCaptchaError() {
-				solveMode, hasSolveMode := captchaSolveModeForAttempt(attempt, manualCaptcha, autoCaptchaSliderPOC)
+				// A redirect-only not-robot page has no image to classify.
+				// A person solves it in the browser; the automatic solver is not used.
+				manualOnly := manualCaptcha || captchaHumanOnly(captchaErr)
+				solveMode, hasSolveMode := captchaSolveModeForAttempt(attempt, manualOnly, autoCaptchaSliderPOC)
 				if !hasSolveMode {
 					log.Printf("[STREAM %d] [Captcha] No more solve modes available (attempt %d)", streamID, attempt+1)
 
@@ -941,36 +942,14 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 						solveErr = fmt.Errorf("missing fields for slider POC auto solve")
 					}
 				case captchaSolveModeManual:
-					log.Printf("[STREAM %d] [Captcha] Triggering manual captcha fallback...", streamID)
-					manualCtx, manualCancel := context.WithTimeout(ctx, 60*time.Second)
-
-					type manualRes struct {
-						token string
-						key   string
-						err   error
-					}
-					resCh := make(chan manualRes, 1)
-
-					go func() {
-						var t, k string
-						var e error
-						if captchaErr.RedirectURI != "" {
-							t, e = solveCaptchaViaProxy(captchaErr.RedirectURI, dialer)
-						} else if captchaErr.CaptchaImg != "" {
-							k, e = solveCaptchaViaHTTP(captchaErr.CaptchaImg)
-						} else {
-							e = fmt.Errorf("no redirect_uri or captcha_img")
-						}
-						resCh <- manualRes{t, k, e}
-					}()
-
-					select {
-					case res := <-resCh:
-						successToken = res.token
-						captchaKey = res.key
-						solveErr = res.err
-					case <-manualCtx.Done():
-						solveErr = fmt.Errorf("manual captcha timed out after 60s")
+					log.Printf("[STREAM %d] [Captcha] Opening captcha in the browser", streamID)
+					manualCtx, manualCancel := context.WithTimeout(ctx, 3*time.Minute)
+					if captchaErr.RedirectURI != "" {
+						successToken, solveErr = solveCaptchaViaProxy(manualCtx, captchaErr.RedirectURI, dialer)
+					} else if captchaErr.CaptchaImg != "" {
+						captchaKey, solveErr = solveCaptchaViaHTTP(manualCtx, captchaErr.CaptchaImg)
+					} else {
+						solveErr = fmt.Errorf("no redirect_uri or captcha_img")
 					}
 					manualCancel()
 				}
@@ -979,7 +958,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 				if solveErr != nil {
 					log.Printf("[STREAM %d] [Captcha] %s failed (attempt %d): %v", streamID, captchaSolveModeLabel(solveMode), attempt+1, solveErr)
 
-					nextSolveMode, hasNextSolveMode := captchaSolveModeForAttempt(attempt+1, manualCaptcha, autoCaptchaSliderPOC)
+					nextSolveMode, hasNextSolveMode := captchaSolveModeForAttempt(attempt+1, manualOnly, autoCaptchaSliderPOC)
 					if hasNextSolveMode {
 						log.Printf("[STREAM %d] [Captcha] Falling back to %s...", streamID, captchaSolveModeLabel(nextSolveMode))
 						continue
