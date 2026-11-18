@@ -3,8 +3,8 @@ package com.turnvpn.app
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.Activity
-import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.net.VpnService
 import android.os.Bundle
@@ -14,6 +14,8 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import com.google.android.material.button.MaterialButton
 
 class MainActivity : AppCompatActivity() {
@@ -156,7 +158,22 @@ class MainActivity : AppCompatActivity() {
         startService(intent)
     }
 
-    private fun prefs() = getSharedPreferences("turnvpn", Context.MODE_PRIVATE)
+    // Keystore-backed encrypted storage for the VPS/secret/link/token, so the shared
+    // secret is not readable in plaintext on a rooted or imaged device.
+    private val securePrefs: SharedPreferences by lazy {
+        val master = MasterKey.Builder(this)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            this,
+            "turnvpn_secure",
+            master,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
+
+    private fun prefs() = securePrefs
 
     private fun loadPrefs() {
         val p = prefs()
