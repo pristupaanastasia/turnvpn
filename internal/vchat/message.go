@@ -160,7 +160,9 @@ func (m Message) TransmittedData() (sdp *SDP, cand *Candidate, ok bool) {
 	if err := json.Unmarshal(m.Data, &p); err != nil {
 		return nil, nil, false
 	}
-	return p.SDP, p.Candidate, true
+	// ok only when a payload is actually present, so a caller can safely
+	// dereference the returned pointer (data may be null or carry neither).
+	return p.SDP, p.Candidate, p.SDP != nil || p.Candidate != nil
 }
 
 // IsConnection reports whether this is the join-confirmation "connection"

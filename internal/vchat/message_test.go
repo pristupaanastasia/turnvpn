@@ -94,6 +94,21 @@ func TestParseCandidateNotification(t *testing.T) {
 	}
 }
 
+func TestTransmittedDataEmptyPayload(t *testing.T) {
+	// A transmitted-data whose data has neither sdp nor candidate must report
+	// ok=false so a caller never dereferences a nil pointer.
+	for _, raw := range []string{
+		`{"type":"notification","notification":"transmitted-data","data":{"animojiVersion":2}}`,
+		`{"type":"notification","notification":"transmitted-data","data":null}`,
+		`{"type":"notification","notification":"transmitted-data"}`,
+	} {
+		m, _ := Parse([]byte(raw))
+		if sdp, cand, ok := m.TransmittedData(); ok || sdp != nil || cand != nil {
+			t.Errorf("%s: want ok=false/nil, got sdp=%v cand=%v ok=%v", raw, sdp, cand, ok)
+		}
+	}
+}
+
 func TestParseResponse(t *testing.T) {
 	raw := []byte(`{"type":"response","response":"update-media-modifiers","sequence":3,"stamp":456}`)
 	m, _ := Parse(raw)
