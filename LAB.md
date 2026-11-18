@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-11-18 — 🏁 Stage 1-3: реальный браузинг через туннель РАБОТАЕТ
+
+**Stage:** Vector 1 / Stage 1-3 · **Verdict:** ✅ **PASS — HTTPS сквозь whitelisted TURN ВК**
+
+- **Tried:** собрал транспорт поверх проверенного DTLS-через-реле:
+  `internal/mux` (KCP+smux поверх DTLS; свой адаптер `net.Conn`→`net.PacketConn`),
+  `internal/socks` (минимальный SOCKS5 CONNECT + per-stream target-заголовок).
+  `cmd/server` (VPS): DTLS → mux → приём потоков → читает `host:port` → `net.Dial` → pipe.
+  `cmd/client` (Mac): локальный SOCKS5 → туннель (креды → TURN Allocate → DTLS → mux);
+  ленивое переподключение при обрыве/протухании кредов (переиспользует call-token).
+- **Result:** `curl --socks5-hostname 127.0.0.1:1080 https://api.ipify.org` → **`<VPS>`**
+  (= IP VPS, трафик реально вышел через него). `curl -I https://example.com` → `HTTP/2 200`.
+  Сервер: `tunnel up from 95.163.34.180:37843` (адрес аллокации реле).
+- **Evidence:** exit-IP = VPS; живой HTTPS-ответ; логи клиента и сервера.
+- **Conclusion:** полная цепочка жива — `браузер → локальный SOCKS5 → DTLS+KCP+smux →
+  TURN-реле ВК → VPS → открытый интернет`. Vector 1 доведён до рабочего VPN-прокси **без
+  WireGuard и без root**. Исходная цель проекта (обойти whitelist через инфру ВК) —
+  достигнута на уровне SOCKS5-прокси.
+- **Next:** Stage 4-5 — устойчивость (health-check/reconnect уже частично есть; keepalive,
+  ротация), шейп битрейта под «конверт звонка» для footprint, авто-рефреш кредов до
+  протухания (не по обрыву), опц. пул параллельных туннелей для throughput.
+
 ## 2026-11-18 — 🎉 Vector 1 ЖИВОЙ: DTLS сквозь TURN-реле ВК доходит до VPS (M0 переопределён)
 
 **Stage:** Vector 1 / Stage 0 (make-or-break) · **Verdict:** ✅ **PASS — гипотеза подтверждена, старый M0-негатив опровергнут**

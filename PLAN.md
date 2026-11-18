@@ -77,33 +77,35 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
 - [x] **Критерий ВЫПОЛНЕН:** маркер прошёл Mac→реле→VPS→обратно; VPS принял DTLS от
       адреса аллокации реле. **Vector 1 жив, M0-негатив опровергнут** (см. `LAB.md`).
 
-### Stage 1 — клиент добычи кредов  ⬅️ **СЕЙЧАС ЗДЕСЬ**
+### Stage 1 — клиент добычи кредов  ✅ **ПРОЙДЕН**
 - [x] `get_anonym_token` → анон-JWT (`vkapi.GetAnonymToken`, капча-free).
 - [x] `calls.getAnonymousToken` → call-token (`vkapi.GetCallToken`; капча = человек).
-- [ ] `auth.anonymLogin` **рабочая форма** (version:2, client_version 1.1,
-      `client_type:SDK_JS`, **без auth_token**) → session_key. *(правим `okapi`.)*
-- [x] `vchat.joinConversationByLink` → дескриптор c `turn_server`.
-- [ ] Кеш кредов ~10 мин + перезапрос (креды короткоживущие).
+- [x] `auth.anonymLogin` рабочая форма (version:2, `client_type:SDK_JS`, **без auth_token**)
+      → session_key (`okapi.AnonymLogin` исправлен).
+- [x] `vchat.joinConversationByLink` → дескриптор c `turn_server` (`cmd/client.fetchTurnCreds`).
+- [~] Перезапрос кредов при обрыве туннеля (есть; авто-рефреш *до* протухания — Stage 5).
 
-### Stage 2 — DTLS relay-клиент
-- [ ] `listen` локальный UDP (туда смотрит WireGuard-клиент).
-- [ ] `pion/turn` Allocate → `relayConn.WriteTo(peer=VPS)`; переобёртка пакетов.
-- [ ] `pion/dtls` поверх relay (self-signed, InsecureSkipVerify) — так payload
-      проходит data plane реле.
-- [ ] Реконнект при протухании кредов/аллокации; опц. параллельные потоки.
+### Stage 2 — транспорт поверх DTLS-туннеля  ✅ **ПРОЙДЕН**
+- [x] `internal/mux`: KCP+smux поверх DTLS (свой адаптер `net.Conn`→`net.PacketConn`).
+- [x] `cmd/client`: `pion/turn` Allocate → `pion/dtls` сквозь relay → `mux.Client`;
+      ленивое переподключение при мёртвой сессии.
+- [x] Мультиплексирование: много потоков в одном DTLS/TURN-туннеле.
 
-### Stage 3 — server на VPS
-- [ ] Приём UDP от реле на `:PORT` → `pion/dtls` server → расшифровка.
-- [ ] Форвард расшифрованного в локальный WireGuard (`-connect 127.0.0.1:<wg>`).
-- [ ] Обратный путь (ответы WG → DTLS → reply на реле → клиент).
+### Stage 3 — SOCKS5 end-to-end  ✅ **ПРОЙДЕН (вместо WireGuard)**
+- [x] `internal/socks`: минимальный SOCKS5 CONNECT + per-stream target-заголовок.
+- [x] `cmd/client`: локальный SOCKS5 на `127.0.0.1:1080` → поток в туннель.
+- [x] `cmd/server` (VPS): DTLS → mux → читает `host:port` → `net.Dial` → pipe.
+- [x] **Проверено:** `curl --socks5-hostname …` → exit-IP = VPS; `example.com` → `HTTP/2 200`.
+      Реальный браузинг через whitelisted TURN ВК работает **без WireGuard, без root**.
 
-### Stage 4 — WireGuard end-to-end
-- [ ] Поднять wg: конфиг клиента смотрит на локальный `listen` клиента; сервер wg
-      на VPS за `server`-прокси; MASQUERADE в интернет.
-- [ ] Проверить реальный трафик (ping/curl через туннель).
+### Stage 4 — (опц.) WireGuard поверх туннеля
+- [ ] Если нужен **весь** трафик машины (не только прокси-приложения): WG-клиент →
+      локальный UDP клиента → туннель → WG-сервер на VPS → MASQUERADE. SOCKS-варианта
+      хватает для веба; WG — апгрейд при желании.
 
-### Stage 5 — устойчивость + footprint
-- [ ] Re-join/refresh кредов, keepalive, смена адресов.
+### Stage 5 — устойчивость + footprint  ⬅️ **СЕЙЧАС ЗДЕСЬ**
+- [ ] Авто-рефреш кредов **до** протухания (сейчас — по обрыву); keepalive/health-check.
+- [ ] Пул параллельных туннелей для throughput (как в референсе).
 - [ ] Шейп битрейта под правдоподобный «конверт» звонка; ротация эндпоинтов.
 - [ ] Реальность: устойчиво тяжёлый трафик через звонок аномален; снижаем
       footprint, но не рассчитываем на невидимость.

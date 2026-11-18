@@ -1,27 +1,29 @@
 // Command client is the computer-side entry of the Vector 1 tunnel.
 //
-// For Stage 0 (the make-or-break relay test) it is a probe: it allocates a relay on
-// a VK TURN server, opens a DTLS connection THROUGH that relay to an external peer
-// (the VPS running `server`), sends a marker and checks it echoes back. A successful
-// round-trip proves the VK TURN relay forwards DTLS-wrapped data to an arbitrary
-// external peer — the premise the whole approach rests on, and the thing an earlier
-// raw-UDP probe (cmd/probe) wrongly reported as dead because it sent unwrapped bytes.
+// It runs a local SOCKS5 proxy. Each accepted connection is carried, as one smux
+// stream, over a single tunnel to the VPS: the tunnel is a KCP+smux session over a
+// DTLS connection that runs THROUGH a VK TURN relay allocation. The VPS `server`
+// dials the SOCKS target and pipes it back, so the browser reaches the open internet
+// over whitelisted VK call infrastructure.
 //
-// TURN credentials come from the VK call join descriptor's turn_server
-// {username, credential, urls} (obtained out of band; capture is human-in-the-loop
-// because the call-token step is captcha-gated). Pass them with -turn/-turn-user/
-// -turn-pass. Later stages grow this into a local SOCKS5 proxy over the tunnel.
+// TURN credentials are fetched from the VK call join descriptor (anonymLogin +
+// joinConversationByLink with the per-call token). They are short-lived; when the
+// tunnel drops (creds expire or the relay resets) the next request transparently
+// re-establishes it with fresh creds, reusing the same call token. Obtaining that
+// call token is human-in-the-loop (the call-token step is captcha-gated).
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,128 +31,214 @@ import (
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/logging"
 	"github.com/pion/turn/v5"
+	"github.com/xtaci/smux"
 
+	"github.com/pristupaanastasia/turnvpn/internal/mux"
 	"github.com/pristupaanastasia/turnvpn/internal/okapi"
+	"github.com/pristupaanastasia/turnvpn/internal/socks"
 )
 
+type config struct {
+	listen, peer, vkLink, token, appKey string
+}
+
 func main() {
-	turnAddr := flag.String("turn", "", "TURN server host:port; if empty, fetched from -vk-link + -token")
-	user := flag.String("turn-user", "", "TURN username (turn_server.username)")
-	pass := flag.String("turn-pass", "", "TURN credential (turn_server.credential); or env TURN_PASS")
-	vkLink := flag.String("vk-link", "", "VK call join link token (from vk.ru/call/join/<token>) to fetch TURN creds")
-	token := flag.String("token", "", "VK per-call guest token (a.token); with -vk-link fetches turn_server (or env TURN_CALL_TOKEN)")
+	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 listen address")
+	peer := flag.String("peer", "", "VPS exit host:port (running `server`)")
+	vkLink := flag.String("vk-link", "", "VK call join link token (from vk.ru/call/join/<token>)")
+	token := flag.String("token", "", "VK per-call guest token (a.token); or env TURN_CALL_TOKEN")
 	appKey := flag.String("app-key", "CGMMEJLGDIHBABABA", "OK application_key (public web-client key)")
-	peer := flag.String("peer", "", "external echo peer host:port (the VPS running `server`)")
-	msg := flag.String("msg", "turnvpn-stage0-probe", "marker payload to send and expect echoed")
 	flag.Parse()
 
-	if *pass == "" {
-		*pass = os.Getenv("TURN_PASS")
-	}
 	if *token == "" {
 		*token = os.Getenv("TURN_CALL_TOKEN")
 	}
-	if *peer == "" {
-		log.Fatal("usage: client -peer vps:port (-turn host:port -turn-user U -turn-pass P | -vk-link <link> -token <call-token>)")
+	if *peer == "" || *vkLink == "" || *token == "" {
+		log.Fatal("usage: client -peer vps:port -vk-link <link> -token <call-token> [-listen 127.0.0.1:1080]")
 	}
+	cfg := config{listen: *listen, peer: *peer, vkLink: *vkLink, token: *token, appKey: *appKey}
 
-	ctx0 := context.Background()
-	// If explicit TURN creds were not given, fetch turn_server from the VK call:
-	// anonymLogin (no token) -> joinConversationByLink(anonymToken=token) -> turn_server.
-	if *turnAddr == "" {
-		if *vkLink == "" || *token == "" {
-			log.Fatal("no TURN creds: pass -turn/-turn-user/-turn-pass, or -vk-link + -token")
-		}
-		ta, u, p, err := fetchTurnCreds(ctx0, *appKey, *vkLink, *token)
-		if err != nil {
-			log.Fatalf("client: fetch turn creds: %v", err)
-		}
-		*turnAddr, *user, *pass = ta, u, p
-		log.Printf("client: got turn_server %s (from VK join)", ta)
-	}
-	if *turnAddr == "" || *user == "" || *pass == "" {
-		log.Fatal("client: incomplete TURN creds")
-	}
-
-	// Local UDP socket the TURN client uses to reach the relay.
-	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	peerAddr, err := net.ResolveUDPAddr("udp4", cfg.peer)
 	if err != nil {
-		log.Fatalf("client: listen udp: %v", err)
+		log.Fatalf("client: resolve peer %q: %v", cfg.peer, err)
 	}
-	defer func() { _ = conn.Close() }()
+
+	t := &tunnel{cfg: cfg, peerAddr: peerAddr}
+	defer t.close()
+
+	ln, err := net.Listen("tcp", cfg.listen)
+	if err != nil {
+		log.Fatalf("client: SOCKS5 listen on %s: %v", cfg.listen, err)
+	}
+	defer func() { _ = ln.Close() }()
+	log.Printf("client: SOCKS5 on %s  ->  tunnel  ->  %s (exit)", cfg.listen, cfg.peer)
+
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			log.Printf("client: accept: %v", err)
+			continue
+		}
+		go serveLocal(t, c)
+	}
+}
+
+// serveLocal handles one local SOCKS5 connection: negotiate the target, open a
+// tunnel stream, send the target header, and pipe.
+func serveLocal(t *tunnel, c net.Conn) {
+	defer func() { _ = c.Close() }()
+
+	target, err := socks.Handshake(c)
+	if err != nil {
+		log.Printf("client: socks: %v", err)
+		return
+	}
+	sess, err := t.get()
+	if err != nil {
+		log.Printf("client: tunnel unavailable: %v", err)
+		return
+	}
+	stream, err := sess.OpenStream()
+	if err != nil {
+		t.markDead(sess) // force re-establish on the next request
+		log.Printf("client: open stream: %v", err)
+		return
+	}
+	defer func() { _ = stream.Close() }()
+	if err := socks.WriteTarget(stream, target); err != nil {
+		log.Printf("client: write target %s: %v", target, err)
+		return
+	}
+	pipe(c, stream)
+}
+
+// tunnel holds the current smux session and lazily (re)establishes it.
+type tunnel struct {
+	cfg      config
+	peerAddr *net.UDPAddr
+
+	mu      sync.Mutex
+	sess    *smux.Session
+	closers []io.Closer
+}
+
+// get returns a live session, establishing or re-establishing it if needed.
+func (t *tunnel) get() (*smux.Session, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.sess != nil && !t.sess.IsClosed() {
+		return t.sess, nil
+	}
+	t.teardownLocked()
+	sess, closers, err := establish(t.cfg, t.peerAddr)
+	if err != nil {
+		return nil, err
+	}
+	t.sess, t.closers = sess, closers
+	return sess, nil
+}
+
+// markDead closes the session if it is still the current one, so get() rebuilds.
+func (t *tunnel) markDead(sess *smux.Session) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.sess == sess && t.sess != nil {
+		_ = t.sess.Close()
+	}
+}
+
+func (t *tunnel) teardownLocked() {
+	if t.sess != nil {
+		_ = t.sess.Close()
+		t.sess = nil
+	}
+	for i := len(t.closers) - 1; i >= 0; i-- {
+		_ = t.closers[i].Close()
+	}
+	t.closers = nil
+}
+
+func (t *tunnel) close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.teardownLocked()
+}
+
+// establish fetches fresh TURN creds, allocates a relay, DTLS-handshakes through it
+// to the VPS, and returns a smux client session plus the resources to close in LIFO.
+func establish(cfg config, peerAddr *net.UDPAddr) (*smux.Session, []io.Closer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	turnAddr, user, pass, err := fetchTurnCreds(ctx, cfg.appKey, cfg.vkLink, cfg.token)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch creds: %w", err)
+	}
+	log.Printf("client: got turn_server %s", turnAddr)
+
+	udp, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	if err != nil {
+		return nil, nil, err
+	}
+	closers := []io.Closer{udp}
+	fail := func(e error) (*smux.Session, []io.Closer, error) {
+		closeAll(closers)
+		return nil, nil, e
+	}
 
 	tc, err := turn.NewClient(&turn.ClientConfig{
-		TURNServerAddr: *turnAddr,
-		Username:       *user,
-		Password:       *pass,
-		Conn:           conn,
+		TURNServerAddr: turnAddr,
+		Username:       user,
+		Password:       pass,
+		Conn:           udp,
 		LoggerFactory:  logging.NewDefaultLoggerFactory(),
 	})
 	if err != nil {
-		log.Fatalf("client: new turn client: %v", err)
+		return fail(err)
 	}
-	defer tc.Close()
 	if err := tc.Listen(); err != nil {
-		log.Fatalf("client: turn listen: %v", err)
+		tc.Close()
+		return fail(err)
 	}
+	closers = append(closers, closerFunc(func() error { tc.Close(); return nil }))
 
-	relayConn, err := tc.Allocate()
+	relay, err := tc.Allocate()
 	if err != nil {
-		log.Fatalf("client: allocate on %s: %v", *turnAddr, err)
+		return fail(fmt.Errorf("allocate: %w", err))
 	}
-	defer func() { _ = relayConn.Close() }()
-	log.Printf("client: allocated relay %s via %s", relayConn.LocalAddr(), *turnAddr)
+	closers = append(closers, relay)
 
-	peerAddr, err := net.ResolveUDPAddr("udp4", *peer)
-	if err != nil {
-		log.Fatalf("client: resolve peer %q: %v", *peer, err)
-	}
 	if err := tc.CreatePermission(peerAddr); err != nil {
-		log.Fatalf("client: create permission for %s: %v", peerAddr, err)
+		return fail(fmt.Errorf("permission: %w", err))
 	}
-	log.Printf("client: permission created for peer %s", peerAddr)
 
 	cert, err := selfsign.GenerateSelfSigned()
 	if err != nil {
-		log.Fatalf("client: self-signed cert: %v", err)
+		return fail(err)
 	}
-
-	// The DTLS handshake runs THROUGH the relay: records are written with
-	// relayConn.WriteTo(.., peerAddr) -> relay -> VPS, replies come back the same
-	// way. If the relay drops non-media/raw payloads this hangs (the old false-
-	// negative symptom); if it completes, DTLS-wrapped data crosses the relay.
-	dconn, err := dtls.ClientWithOptions(relayConn, peerAddr,
+	dconn, err := dtls.ClientWithOptions(relay, peerAddr,
 		dtls.WithCertificates(cert),
 		dtls.WithInsecureSkipVerify(true),
 		dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
 		dtls.WithCipherSuites(dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
 	)
 	if err != nil {
-		log.Fatalf("client: dtls client setup: %v", err)
+		return fail(err)
 	}
-	defer func() { _ = dconn.Close() }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := dconn.HandshakeContext(ctx); err != nil {
-		log.Fatalf("client: DTLS handshake through relay FAILED: %v\n"+
-			"(Stage 0 negative: the relay did not pass the DTLS handshake to the peer)", err)
-	}
-	log.Printf("client: DTLS handshake OK through relay — testing echo")
-
-	if _, err := dconn.Write([]byte(*msg)); err != nil {
-		log.Fatalf("client: write: %v", err)
-	}
-	_ = dconn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	buf := make([]byte, 64*1024)
-	n, err := dconn.Read(buf)
+	hctx, hcancel := context.WithTimeout(context.Background(), 20*time.Second)
+	err = dconn.HandshakeContext(hctx)
+	hcancel()
 	if err != nil {
-		log.Fatalf("client: read echo: %v\n(handshake crossed but data did not round-trip)", err)
+		return fail(fmt.Errorf("dtls handshake: %w", err))
 	}
-	if got := string(buf[:n]); got != *msg {
-		log.Fatalf("client: STAGE 0 MISMATCH: sent %q, got %q", *msg, got)
+	closers = append(closers, dconn)
+
+	sess, err := mux.Client(dconn)
+	if err != nil {
+		return fail(err)
 	}
-	log.Printf("client: STAGE 0 PASS ✅ — %q echoed back through VK relay + DTLS", *msg)
+	log.Printf("client: tunnel established (relay %s)", relay.LocalAddr())
+	return sess, closers, nil
 }
 
 // fetchTurnCreds runs the minimal OK join to extract the call's TURN credentials:
@@ -179,4 +267,29 @@ func turnHostPort(u string) string {
 	u = strings.TrimPrefix(u, "turns:")
 	u = strings.TrimPrefix(u, "turn:")
 	return u
+}
+
+// pipe copies bytes both ways between a and b until either side ends.
+func pipe(a, b net.Conn) {
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		done <- struct{}{}
+	}
+	go cp(a, b)
+	go cp(b, a)
+	<-done
+	_ = a.Close()
+	_ = b.Close()
+	<-done
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
+
+func closeAll(cs []io.Closer) {
+	for i := len(cs) - 1; i >= 0; i-- {
+		_ = cs[i].Close()
+	}
 }
