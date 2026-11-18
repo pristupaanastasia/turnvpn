@@ -20,3 +20,4 @@ vk-creds*.env
 /server
 /turnvpn-client
 /turnvpn-server
+/dist/

@@ -128,6 +128,28 @@ DNS-запросы через прокси при использовании SOC
 Без `-token` клиент берёт креды из подключённого в `main` провайдера (напр.
 решателя капчи) — его поставляешь ты.
 
+## Android (Termux)
+
+Termux — это Linux-окружение на Android, поэтому там запускается обычный Linux-бинарник;
+отдельное приложение не нужно. Всё чистое Go (без NDK).
+
+1. Собери клиент под телефон (на компе):
+   ```sh
+   ./scripts/build.sh android   # → dist/turnvpn-client-android-arm64 (+ -arm для старых)
+   ```
+2. Перекинь бинарник в Termux (scp/облако/кабель), дай права `chmod +x`, запусти как на компе:
+   ```sh
+   TURNVPN_SECRET='<секрет>' ./turnvpn-client-android-arm64 \
+     -peer <IP_VPS>:56000 -vk-link <токен> -tunnels 2
+   ```
+3. Клиент поднимет SOCKS5 на `127.0.0.1:1080`. Чтобы пустить через него трафик, нужен
+   **SOCKS5-совместимый** путь на телефоне: браузер/приложение с поддержкой SOCKS5,
+   либо tun2socks/VPN-приложение, принимающее SOCKS5. Капчу решаешь в браузере телефона.
+
+> Полноценное **нативное приложение** (Kotlin + `VpnService`, чтобы гнать **весь** трафик
+> телефона без Termux) — отдельная задача (Stage 10 в `PLAN.md`): нужен Android SDK/NDK и
+> tun2socks/gomobile. Termux-путь работает уже сейчас.
+
 ## Статус
 
 Vector 1 (TURN-реле + DTLS + SOCKS5) **работает end-to-end**: реальный HTTPS-браузинг
@@ -256,6 +278,29 @@ The client opens a local **SOCKS5 proxy at `127.0.0.1:1080`**. Point the browser
 locally. Keep the browser call alive while the tunnel is up. Without `-token`,
 the client uses the credential provider wired in `main` (e.g. a captcha fetcher)
 — which you supply.
+
+## Android (Termux)
+
+Termux is a Linux environment on Android, so it runs an ordinary Linux binary — no
+separate app and no NDK needed (everything is pure Go).
+
+1. Build the client for the phone (on your computer):
+   ```sh
+   ./scripts/build.sh android   # → dist/turnvpn-client-android-arm64 (+ -arm for old phones)
+   ```
+2. Copy the binary into Termux, `chmod +x` it, and run it as on desktop:
+   ```sh
+   TURNVPN_SECRET='<secret>' ./turnvpn-client-android-arm64 \
+     -peer <VPS_IP>:56000 -vk-link <token> -tunnels 2
+   ```
+3. The client exposes SOCKS5 on `127.0.0.1:1080`. To route traffic through it you need
+   a **SOCKS5-capable** path on the phone: a browser/app that supports SOCKS5, or a
+   tun2socks / VPN app that accepts a SOCKS5 upstream. Solve the captcha in the phone's
+   browser.
+
+> A full **native app** (Kotlin + `VpnService`, to route the whole device without
+> Termux) is a separate task (Stage 10 in `PLAN.md`): it needs the Android SDK/NDK and
+> tun2socks/gomobile. The Termux path already works today.
 
 ## Status
 
