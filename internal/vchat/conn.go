@@ -16,6 +16,11 @@ type Transport interface {
 // Conn drives the vchat protocol over a Transport: it parses inbound messages,
 // answers heartbeats itself, and surfaces the rest as typed events. Outbound
 // commands get an auto-incrementing sequence. Create it with NewConn.
+//
+// Ownership: the caller owns the Transport and must close it. The read loop
+// answers pings with a synchronous Send, so if that write blocks (transport flow
+// control) Close would wait on the loop; closing the Transport unblocks the write.
+// Therefore close the Transport alongside or before Conn.Close().
 type Conn struct {
 	t      Transport
 	events chan Message
@@ -64,7 +69,9 @@ func (c *Conn) SendCandidate(participantID int64, cand Candidate) error {
 	return c.t.Send(b)
 }
 
-// Close stops the driver and waits for its loop to exit.
+// Close stops the driver and waits for its loop to exit. It does not close the
+// Transport (the caller owns it); close the Transport too, alongside or before
+// this, so a pong write stuck in Send cannot delay the loop's exit.
 func (c *Conn) Close() {
 	c.closeOnce.Do(func() { close(c.quit) })
 	<-c.done
