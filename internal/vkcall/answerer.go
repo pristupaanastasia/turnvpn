@@ -3,7 +3,7 @@ package vkcall
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
+	"sync"
 
 	"github.com/pion/webrtc/v4"
 
@@ -37,10 +37,25 @@ var (
 // we answer. It consumes vchat signaling events, drives the pion PeerConnection
 // through SetRemoteDescription(offer) → CreateAnswer → SetLocalDescription, sends
 // the answer back, and trickles ICE candidates both ways.
+//
+// Ordering is handled for the SFU's benefit: remote candidates that arrive before
+// the offer are queued and applied after SetRemoteDescription; local candidates
+// gathered before the answer is sent are buffered and flushed only after it, so
+// the SFU never sees a candidate for a peer before that peer's answer.
 type Answerer struct {
-	sig    signaler
-	pc     peerConn
-	peerID atomic.Int64 // the participant to address (learned from the offer)
+	sig signaler
+	pc  peerConn
+
+	// Logf, if set, receives non-fatal diagnostics (a bad candidate, a trickle
+	// send error). nil discards them.
+	Logf func(string, ...any)
+
+	mu            sync.Mutex
+	peerID        int64             // participant to address; learned from the offer
+	answered      bool              // answer SDP sent — local candidates may flow
+	localPending  []vchat.Candidate // local candidates gathered before the answer
+	remoteSet     bool              // remote description applied
+	remotePending []vchat.Candidate // remote candidates that arrived before the offer
 }
 
 // NewAnswerer wires the signaler and peer connection and registers local ICE
@@ -51,18 +66,31 @@ func NewAnswerer(sig signaler, pc peerConn) *Answerer {
 		if c == nil {
 			return // end-of-candidates
 		}
-		pid := a.peerID.Load()
-		if pid == 0 {
-			return // no peer addressed yet; the offer sets it before gathering
+		cand := toVchatCandidate(c.ToJSON())
+		a.mu.Lock()
+		if !a.answered {
+			a.localPending = append(a.localPending, cand) // flushed after the answer
+			a.mu.Unlock()
+			return
 		}
-		_ = a.sig.SendCandidate(pid, toVchatCandidate(c.ToJSON()))
+		pid := a.peerID
+		a.mu.Unlock()
+		if err := a.sig.SendCandidate(pid, cand); err != nil {
+			a.log("vkcall: send local candidate: %v", err)
+		}
 	})
 	return a
 }
 
-// Run processes signaling until an offer has been answered, then keeps trickling
-// candidates until ctx is cancelled or the event stream ends. It returns nil on a
-// clean end (ctx done or events closed) and an error only on a signaling failure.
+func (a *Answerer) log(format string, args ...any) {
+	if a.Logf != nil {
+		a.Logf(format, args...)
+	}
+}
+
+// Run processes signaling until ctx is cancelled or the event stream ends. It
+// returns nil on a clean end and an error only on a fatal signaling/peer failure
+// (a bad individual ICE candidate is logged and skipped, not fatal).
 func (a *Answerer) Run(ctx context.Context) error {
 	for {
 		select {
@@ -85,23 +113,44 @@ func (a *Answerer) handle(msg vchat.Message) error {
 		return nil // not an SDP/ICE message (connection notice, response, …)
 	}
 	if msg.ParticipantID != 0 {
-		a.peerID.Store(msg.ParticipantID)
+		a.mu.Lock()
+		a.peerID = msg.ParticipantID
+		a.mu.Unlock()
 	}
 	switch {
 	case sdp != nil && sdp.Type == "offer":
 		return a.answer(*sdp)
 	case cand != nil:
-		return a.addCandidate(*cand)
+		return a.addRemoteCandidate(*cand)
 	}
 	return nil
 }
 
 func (a *Answerer) answer(offer vchat.SDP) error {
+	a.mu.Lock()
+	pid := a.peerID
+	a.mu.Unlock()
+	if pid == 0 {
+		return fmt.Errorf("vkcall: offer carried no participantId to answer")
+	}
+
 	if err := a.pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer, SDP: offer.SDP,
 	}); err != nil {
 		return fmt.Errorf("vkcall: set remote offer: %w", err)
 	}
+	// Remote description is set: apply any candidates that arrived before it.
+	a.mu.Lock()
+	a.remoteSet = true
+	pendingRemote := a.remotePending
+	a.remotePending = nil
+	a.mu.Unlock()
+	for _, c := range pendingRemote {
+		if err := a.pc.AddICECandidate(toICECandidateInit(c)); err != nil {
+			a.log("vkcall: add queued remote candidate: %v", err)
+		}
+	}
+
 	answer, err := a.pc.CreateAnswer(nil)
 	if err != nil {
 		return fmt.Errorf("vkcall: create answer: %w", err)
@@ -109,15 +158,35 @@ func (a *Answerer) answer(offer vchat.SDP) error {
 	if err := a.pc.SetLocalDescription(answer); err != nil {
 		return fmt.Errorf("vkcall: set local answer: %w", err)
 	}
-	if err := a.sig.SendSDP(a.peerID.Load(), vchat.SDP{Type: "answer", SDP: answer.SDP}); err != nil {
+	if err := a.sig.SendSDP(pid, vchat.SDP{Type: "answer", SDP: answer.SDP}); err != nil {
 		return fmt.Errorf("vkcall: send answer: %w", err)
+	}
+	// Answer is on the wire: flush the local candidates buffered during gathering,
+	// then let later ones send directly.
+	a.mu.Lock()
+	a.answered = true
+	flush := a.localPending
+	a.localPending = nil
+	a.mu.Unlock()
+	for _, c := range flush {
+		if err := a.sig.SendCandidate(pid, c); err != nil {
+			a.log("vkcall: flush local candidate: %v", err)
+		}
 	}
 	return nil
 }
 
-func (a *Answerer) addCandidate(c vchat.Candidate) error {
+func (a *Answerer) addRemoteCandidate(c vchat.Candidate) error {
+	a.mu.Lock()
+	if !a.remoteSet {
+		a.remotePending = append(a.remotePending, c) // applied after SetRemoteDescription
+		a.mu.Unlock()
+		return nil
+	}
+	a.mu.Unlock()
+	// A single bad candidate must not tear down the join.
 	if err := a.pc.AddICECandidate(toICECandidateInit(c)); err != nil {
-		return fmt.Errorf("vkcall: add remote candidate: %w", err)
+		a.log("vkcall: add remote candidate: %v", err)
 	}
 	return nil
 }
