@@ -32,6 +32,20 @@
 до `getAnonymousToken`/callToken; (3) реализовать длина-префикс фрейминг + компрессию
 над WT. Исследовательская фаза Stage 1 завершена.
 
+## 2026-11-18 — VK getAnonymousToken: форма подтверждена + CAPTCHA-гейт
+
+**Stage:** rung 7 validation · **Verdict:** ✅ форма, 🔴 captcha-потолок
+
+Живой гостевой джойн (logged-out), хук на login.vk.ru/web.api.vk. Находки:
+- **`calls.getAnonymousToken` форма подтверждена:** `POST .../method/calls.getAnonymousToken?v=5.289&client_id=6287487` (v+client_id в QUERY), тело `vk_join_link`,`name`,`access_token`.
+  Поправил `GetCallToken` под это (раньше всё клал в тело без client_id).
+- **CAPTCHA:** ответ = `{"error_code":14,"error_msg":"Captcha need","is_enabled_captcha":true,"redirect_uri":<1722B>}`. VK требует капчу на анонимный токен (анти-абуз, от частых джойнов).
+  Капчу НЕ обходим (запрещено). `GetCallToken` теперь отдаёт её отдельной ошибкой. Это реальный
+  потолок headless-автоматизации — нужен ручной шаг или ротация IP.
+- **`get_anonym_token` не пойман:** идёт cross-origin (VK ID SDK, iframe login.vk.ru/id.vk.ru),
+  страничный fetch/XHR-хук не достаёт. `GetAnonymToken` остаётся EXPERIMENTAL; для формы нужен
+  network-level захват или login-чанк.
+
 ## 2026-11-17 — Stage 1 финал: сигнальный канал = WebTransport; формат — из статики
 
 **Stage:** 1d-tail · **Verdict:** ✅ транспорт подтверждён; wire-формат — задача статич. разбора

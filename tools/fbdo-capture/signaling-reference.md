@@ -25,10 +25,17 @@ API: часть вызовов = джойн/логин, часть = телем�
    **Точная HTTP-форма (`act`/endpoint/кодирование) — в VK login-модуле, которого
    нет; помечено EXPERIMENTAL.** Уточнить захватом реального `get_anonym_token`
    (свежий гость с очищенными cookie) или скачав login-чанк.
-2. **`calls.getAnonymousToken`** (`web.api.vk.ru/method/`, стандартный VK API:
-   `access_token`+`v=5.226`) с параметрами `vk_join_link=<токен ссылки>`,
-   `name=<имя гостя>` → `response.token` = **`callToken`**. Эта часть грунтована
-   (параметры из чанка + публичный VK API) и покрыта тестами.
+2. **`calls.getAnonymousToken`** — форма подтверждена живым захватом (2026-11-18):
+   `POST web.api.vk.ru/method/calls.getAnonymousToken?v=5.289&client_id=6287487`
+   (**`v` и `client_id` в query**), тело: `vk_join_link`, `name`, `access_token`
+   (288-симв. JWT). → `response.token` = **`callToken`**. Грунтовано + тесты.
+
+   **⚠️ Captcha-гейт:** VK может вернуть ошибку `{"error_code":14,"error_msg":
+   "Captcha need","is_enabled_captcha":true,"redirect_uri":...}` — анти-абуз,
+   триггерится частыми джойнами с одного IP. Headless-клиент капчу решать не может
+   и не должен (запрещено). `GetCallToken` отдаёт это отдельной понятной ошибкой.
+   Это реальный потолок полной автоматизации: при captcha нужен ручной
+   шаг/ротация IP.
 
 `callToken` далее идёт в OK: `auth.anonymLogin` (`auth_token`) и
 `vchat.joinConversationByLink` (`anonymToken`). Токены короткоживущие.

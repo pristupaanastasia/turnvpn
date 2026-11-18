@@ -35,10 +35,13 @@ const (
 	WebClientID = "6287487"
 	// AnonClientSecret is the public web-client secret used for get_anonym_token.
 	AnonClientSecret = "QbYic1K3lEV5kTGiqlq2"
-	// APIVersion is the VK API version the web client sends.
-	APIVersion = "5.226"
+	// APIVersion is the VK API version the web client sends (observed live;
+	// drifts with releases).
+	APIVersion = "5.289"
 	// AnonTokenType is the token_type passed to get_anonym_token.
 	AnonTokenType = "messages"
+	// AnonTokenVersion is the version passed to get_anonym_token (from the chunk).
+	AnonTokenVersion = "5.226"
 )
 
 // Default service hosts.
@@ -116,13 +119,16 @@ func (c *Client) GetCallToken(ctx context.Context, accessToken, joinLink, name s
 	if accessToken == "" || joinLink == "" {
 		return "", fmt.Errorf("vkapi: GetCallToken needs accessToken and joinLink")
 	}
+	// Observed live form: v and client_id go in the query; vk_join_link, name and
+	// access_token go in the POST body.
+	endpoint := c.apiBase() + "/method/calls.getAnonymousToken" +
+		"?v=" + url.QueryEscape(APIVersion) + "&client_id=" + url.QueryEscape(WebClientID)
 	form := url.Values{
 		"vk_join_link": {joinLink},
 		"name":         {name},
 		"access_token": {accessToken},
-		"v":            {APIVersion},
 	}
-	data, err := c.postForm(ctx, c.apiBase()+"/method/calls.getAnonymousToken", form)
+	data, err := c.postForm(ctx, endpoint, form)
 	if err != nil {
 		return "", err
 	}
@@ -130,13 +136,22 @@ func (c *Client) GetCallToken(ctx context.Context, accessToken, joinLink, name s
 		Response struct {
 			Token string `json:"token"`
 		} `json:"response"`
-		Error *vkError `json:"error"`
+		Error *struct {
+			Code           int    `json:"error_code"`
+			Msg            string `json:"error_msg"`
+			CaptchaEnabled bool   `json:"is_enabled_captcha"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		return "", fmt.Errorf("vkapi: decode getAnonymousToken: %w", err)
 	}
 	if env.Error != nil {
-		return "", env.Error
+		// VK can gate the anonymous token behind a captcha (anti-abuse); a headless
+		// client cannot and must not solve it. Surface it as its own error.
+		if env.Error.CaptchaEnabled || env.Error.Code == 14 {
+			return "", fmt.Errorf("vkapi: getAnonymousToken requires a captcha (error %d: %s); the headless flow is blocked here", env.Error.Code, env.Error.Msg)
+		}
+		return "", &vkError{Code: env.Error.Code, Msg: env.Error.Msg}
 	}
 	if env.Response.Token == "" {
 		return "", fmt.Errorf("vkapi: getAnonymousToken returned no token")
@@ -159,7 +174,7 @@ func (c *Client) GetAnonymToken(ctx context.Context) (string, error) {
 		"client_id":     {WebClientID},
 		"client_secret": {AnonClientSecret},
 		"token_type":    {AnonTokenType},
-		"version":       {APIVersion},
+		"version":       {AnonTokenVersion},
 	}
 	data, err := c.postForm(ctx, c.loginBase()+"/", form)
 	if err != nil {

@@ -4,15 +4,18 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
 
 func TestGetCallToken(t *testing.T) {
 	var gotPath string
+	var gotQuery url.Values
 	var gotForm map[string][]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotQuery = r.URL.Query()
 		r.ParseForm()
 		gotForm = r.PostForm
 		w.Header().Set("Content-Type", "application/json")
@@ -31,12 +34,35 @@ func TestGetCallToken(t *testing.T) {
 	if gotPath != "/method/calls.getAnonymousToken" {
 		t.Errorf("path = %q", gotPath)
 	}
+	// v and client_id are in the query (observed live form).
+	if gotQuery.Get("v") != APIVersion || gotQuery.Get("client_id") != WebClientID {
+		t.Errorf("query = %v, want v=%s client_id=%s", gotQuery, APIVersion, WebClientID)
+	}
+	// vk_join_link, name, access_token are in the body; v is NOT.
 	for k, want := range map[string]string{
-		"vk_join_link": "linktok", "name": "probe", "access_token": "ANON", "v": APIVersion,
+		"vk_join_link": "linktok", "name": "probe", "access_token": "ANON",
 	} {
 		if got := gotForm[k]; len(got) != 1 || got[0] != want {
 			t.Errorf("form %q = %v, want %q", k, got, want)
 		}
+	}
+	if gotForm["v"] != nil {
+		t.Errorf("v should be in the query, not the body")
+	}
+}
+
+func TestGetCallTokenCaptcha(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"error":{"error_code":14,"error_msg":"Captcha need","is_enabled_captcha":true}}`))
+	}))
+	defer srv.Close()
+	c := &Client{APIBase: srv.URL}
+	_, err := c.GetCallToken(context.Background(), "A", "L", "n")
+	if err == nil {
+		t.Fatal("expected captcha error")
+	}
+	if !strings.Contains(err.Error(), "captcha") {
+		t.Errorf("error = %q, want it to mention captcha", err)
 	}
 }
 
