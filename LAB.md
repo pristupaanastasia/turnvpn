@@ -6,6 +6,42 @@
 
 ---
 
+## 2026-11-19 — 🏁 Вариант B (kernel-exit) ЖИВОЙ e2e через реальный TURN VK ✅
+
+**Stage:** Server scaling / exit-plane B · **Verdict:** ✅ kernel-exit доказан вживую, прод не тронут
+
+- **Tried:** реализовал сменный серверный выход (`-exit userspace|kernel`), поднял
+  kernel-exit на VPS **параллельно** проду: `scripts/kernel-exit-setup.sh up` →
+  реальный `wg0` (тем же серверным WG-ключом) + nft MASQUERADE + egress-фильтр;
+  relay `internal/kernelexit` на `:56001`; провижининг пиров из файла (startup +
+  SIGHUP). Прод userspace `:56000` не трогал. Клиент — тот же Android-app (его
+  WG-pubkey уже зарегистрирован), только порт `:56001`; свежий call-token — капча
+  (решил человек).
+- **Находка (деплой на ufw-боксе):** `FORWARD policy DROP` сосуществует с nft-accept
+  и побеждает → туннельный трафик дропался до egress, хотя `wg0`+MASQUERADE верны.
+  Фикс: setup-скрипт сам ставит `iptables -I FORWARD -i/-o <wgif> ACCEPT` (nft
+  egress-фильтр SSRF при этом продолжает резать). PR #13.
+- **Result:** сервер `tunnel up from 95.163.34.163 (exit=kernel)` (**реле VK**);
+  `wg0` — живой хэндшейк, трафик рос `13→57 KiB in / 32→199 KiB sent` по мере
+  загрузки страниц; в браузере эмулятора `api.ipify.org` → **`45.140.200.133`
+  (IP VPS)**.
+- **Evidence:** Android → TURN-реле VK 95.163.34.163 → DTLS → VPS:56001 → relay →
+  ядро `wg0` → MASQUERADE → интернет; exit-IP = VPS. Изолированно (до e2e) проверен
+  и SSRF-дроп: `169.254.169.254`/`127.0.0.0/8`/RFC1918 блокируются при рабочем
+  public-egress.
+- **Conclusion:** kernel-exit (вариант B) работает в прод-подобных условиях.
+  Identity клиента = WG-pubkey развязана с транспортом → серверный выход сменный
+  **без изменений клиента/протокола** (тот же carrier TURN+DTLS, тот же серверный
+  ключ). Масштаб: ~0.2 МБ/клиент vs ~2–5 МБ у userspace, kernel-throughput.
+- **Next:** промоут kernel-exit в прод (systemd-юнит с правами на `wg0`/nft,
+  переключение `:56000`) — отдельной задачей; плюс SO_REUSEPORT-шардинг листенера и
+  per-peer `tc`-шейп (userspace `-shape` kernel-аналога пока не имеет).
+
+После прогона тестовая обвязка на VPS снесена (`wg0`/nft/ufw-56001/FORWARD),
+прод-only восстановлен. На main: #11 (kernel-exit relay), #12 (провижининг +
+двух-клиентская диаграмма), #13 (ufw-fix), #14 (экран Настроек). Решение и цифры —
+в `docs/kernel-exit.md` и памяти `exit-plane-kernel-b`.
+
 ## 2026-11-19 — 🏁 Android WireGuard ЖИВОЙ end-to-end через реальный TURN VK ✅
 
 **Stage:** Stage 10 (Android) · **Verdict:** ✅ полный путь доказан вживую на эмуляторе
