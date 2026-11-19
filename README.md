@@ -22,17 +22,12 @@ TURN-серверы за звонками VK — в белом списке (о�
 трафик в интернет. Наружу на клиенте — локальный SOCKS5-прокси.
 
 ```
-  machine inside the whitelist                               open internet
-┌──────────────────────────────┐                          ┌───────────────┐
-│ browser / app                │                          │  any website  │
-│   │ SOCKS5  127.0.0.1:1080   │                          └──────▲────────┘
-│   ▼                          │                                 │ TCP/UDP
-│ cmd/client                   │        VK TURN relay     ┌──────┴────────┐
-│   WireGuard (userspace)      │      (whitelisted IP)    │ cmd/server    │
-│   → DTLS ────────────────────┼──► ChannelData ──► UDP ─►│  (your VPS)   │
-│   over a pion/turn alloc     │   (looks like media)     │ DTLS→WireGuard│
-└──────────────────────────────┘                          │ → dial target │
-                                                          └───────────────┘
+client A (WG key A) ─DTLS─► TURN relay #1 ─┐
+                                           │
+                                           ├──► VPS :56000 — различает клиентов по WG-pubkey
+                                           │    key A → пир 10.6.0.2
+client B (WG key B) ─DTLS─► TURN relay #2 ─┘    key B → пир 10.6.0.3
+                                                общий выход (-exit):  userspace netstack │ kernel wg0+nft   ─►  интернет
 ```
 
 ### Серверный выход — сменный (`-exit`)
@@ -232,17 +227,12 @@ on a userspace stack (no TUN, no root), and the VPS exit terminates WireGuard an
 egresses to the internet. Locally the client exposes a SOCKS5 proxy.
 
 ```
-  machine inside the whitelist                               open internet
-┌──────────────────────────────┐                          ┌───────────────┐
-│ browser / app                │                          │  any website  │
-│   │ SOCKS5  127.0.0.1:1080   │                          └──────▲────────┘
-│   ▼                          │                                 │ TCP/UDP
-│ cmd/client                   │        VK TURN relay     ┌──────┴────────┐
-│   WireGuard (userspace)      │      (whitelisted IP)    │ cmd/server    │
-│   → DTLS ────────────────────┼──► ChannelData ──► UDP ─►│  (your VPS)   │
-│   over a pion/turn alloc     │   (looks like media)     │ DTLS→WireGuard│
-└──────────────────────────────┘                          │ → dial target │
-                                                          └───────────────┘
+client A (WG key A) ─DTLS─► TURN relay #1 ─┐
+                                           │
+                                           ├──► VPS :56000 — demux clients by WG pubkey
+                                           │    key A → peer 10.6.0.2
+client B (WG key B) ─DTLS─► TURN relay #2 ─┘    key B → peer 10.6.0.3
+                                                shared exit (-exit):  userspace netstack │ kernel wg0+nft   ─►  internet
 ```
 
 ### Server exit — pluggable (`-exit`)
