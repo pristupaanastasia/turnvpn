@@ -124,8 +124,10 @@ func Dial(ctx context.Context, cfg Config) (net.Conn, []io.Closer, error) {
 // TokenCreds returns a Creds that derives turn_server from a VK call using a call
 // token obtained out of band (human-in-the-loop; no captcha solving here).
 func TokenCreds(appKey, link, token string) Creds {
-	return func(ctx context.Context) (string, string, string, error) {
-		return fetchTurnCreds(ctx, appKey, link, token)
+	return func(ctx context.Context) (user, pass, addr string, err error) {
+		// fetchTurnCreds returns (addr, user, pass); Creds yields (user, pass, addr).
+		addr, user, pass, err = fetchTurnCreds(ctx, appKey, link, token)
+		return user, pass, addr, err
 	}
 }
 

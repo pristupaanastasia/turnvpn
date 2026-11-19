@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-11-19 — 🏁 Android WireGuard ЖИВОЙ end-to-end через реальный TURN VK ✅
+
+**Stage:** Stage 10 (Android) · **Verdict:** ✅ полный путь доказан вживую на эмуляторе
+
+- **Tried:** собрал `.aar`+APK (поставив JDK17/SDK34/NDK26/gomobile), поднял AVD
+  `turnvpn` (android-34 arm64), поставил APK, завёл конфиг (peer, DTLS-секрет, server
+  WG pubkey, vk-link), создал живой звонок VK, прошёл капчу («я не робот» —
+  слайдер, решил человек в окне эмулятора), приложение само поймало `anonymToken`.
+- **Баг найден и пофикшен:** `carrier.TokenCreds` возвращал `fetchTurnCreds` как есть
+  — а тот отдаёт `(addr, user, pass)`, тогда как `Creds` ждёт `(user, pass, addr)`.
+  TURN-адресом становился credential без порта → `start failed: address …: missing
+  port`. В старом `cmd/client.defaultCreds` переставлялось, при выделении в `carrier`
+  — забыл. Пересобрал `.aar`+APK с фиксом.
+- **Result:** `Vpn: Established … on tun0` (10.6.0.2/32), `turnvpn: turnvpn started`.
+  Сервер: `tunnel up from 95.163.34.163` (**адрес TURN-реле VK**). В браузере
+  эмулятора `api.ipify.org` → **`45.140.200.133` (IP VPS)**.
+- **Evidence:** цепочка Chrome→tun0→WireGuard→DTLS→TURN-реле VK→VPS→выход→exit-IP=VPS.
+- **Conclusion:** HolubVPN на WireGuard реально выпускает трафик через VPS по
+  whitelisted-инфраструктуре VK. Разворот на WireGuard завершён и подтверждён вживую.
+- **Косяк тестов:** `carrier_test.TestDial` не ловил своп (передавал Creds в верном
+  порядке напрямую); живой прогон поймал. Контракт `Creds`=(user,pass,addr).
+
 ## 2026-11-19 — WireGuard: Android-ядро мигрировано, legacy mux/tunnel/vpntun удалены ✅ (Go)
 
 **Stage:** Stage 10 (Android) · **Verdict:** ✅ Go-часть готова, собирается под
