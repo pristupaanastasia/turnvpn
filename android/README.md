@@ -43,6 +43,8 @@ cd android && ./gradlew assembleDebug
 ## Оговорки
 
 - Пока **только arm64**.
+- Для keyring-режима сервера (несколько телефонов) — поле «DTLS identity» (опционально);
+  пусто = единый `-secret`.
 - WireGuard несёт весь трафик (TCP, UDP, QUIC); DNS резолвится на VPS. DTLS-секрет и
   приватный ключ WireGuard хранятся в Android Keystore (`EncryptedSharedPreferences`),
   бэкап приложения отключён.

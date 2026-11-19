@@ -73,6 +73,7 @@ class TurnvpnService : VpnService() {
                 intent.getStringExtra(EXTRA_WGKEY) ?: "",
                 intent.getStringExtra(EXTRA_WGSERVERPUB) ?: "",
                 wgAddr,
+                intent.getStringExtra(EXTRA_IDENTITY) ?: "",
             )
             goFd = -1 // ownership handed to Go; the engine closes it on Stop()
             Log.i(TAG, "turnvpn started")
@@ -149,6 +150,7 @@ class TurnvpnService : VpnService() {
         const val EXTRA_WGKEY = "wgkey"
         const val EXTRA_WGSERVERPUB = "wgserverpub"
         const val EXTRA_WGADDR = "wgaddr"
+        const val EXTRA_IDENTITY = "identity"
         const val DEFAULT_APPKEY = "CGMMEJLGDIHBABABA"
         const val DEFAULT_WGADDR = "10.6.0.2"
     }
