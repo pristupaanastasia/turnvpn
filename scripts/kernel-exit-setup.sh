@@ -100,14 +100,29 @@ table inet $NFT_TABLE {
 }
 EOF
 	echo "nft table inet/$NFT_TABLE installed (egress filter + masquerade)"
+
+	# 5. Allow forwarding for the wg interface. On a ufw/iptables host the FORWARD
+	#    policy is DROP, and that coexists with (is not overridden by) our nft
+	#    accept — so tunnel traffic would be dropped before egress. Add explicit
+	#    FORWARD accepts; the nft egress filter above still drops SSRF targets, so
+	#    this opens only legitimate egress. No-op on a host without iptables.
+	if command -v iptables >/dev/null 2>&1; then
+		iptables -C FORWARD -i "$WG_IF" -j ACCEPT 2>/dev/null || iptables -I FORWARD -i "$WG_IF" -j ACCEPT
+		iptables -C FORWARD -o "$WG_IF" -j ACCEPT 2>/dev/null || iptables -I FORWARD -o "$WG_IF" -j ACCEPT
+		echo "iptables FORWARD opened for $WG_IF (ufw-compatible)"
+	fi
 	echo "up. start the relay:  turnvpn-server -exit kernel -wg-port $WG_PORT ..."
 }
 
 down() {
 	need_root
 	nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+	if command -v iptables >/dev/null 2>&1; then
+		iptables -D FORWARD -i "$WG_IF" -j ACCEPT 2>/dev/null || true
+		iptables -D FORWARD -o "$WG_IF" -j ACCEPT 2>/dev/null || true
+	fi
 	ip link del "$WG_IF" 2>/dev/null || true
-	echo "down: removed $WG_IF and nft table inet/$NFT_TABLE (ip_forward left as-is)"
+	echo "down: removed $WG_IF, nft table inet/$NFT_TABLE and FORWARD rules (ip_forward left as-is)"
 }
 
 case "${1:-}" in
