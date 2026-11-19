@@ -6,6 +6,60 @@
 
 ---
 
+## 2026-11-19 — WireGuard: userspace exit-gateway форвардит в интернет ✅ (локально)
+
+**Stage:** Stage 4/8 (WireGuard, серверная часть) · **Verdict:** ✅ полный серверный
+путь доказан локально, `-race` чисто (2×)
+
+- **Tried:** `internal/wggw` — серверный WG-выход **целиком в userspace**: терминирует
+  WG поверх carrier-conn (`wgbind`) → gvisor-netstack в **promiscuous+spoofing**
+  (принимает любой dst, т.к. клиент роутит `0.0.0.0/0`) → `tcp.NewForwarder`/
+  `udp.NewForwarder` диалят цель с хоста (`net.Dial`) и сплайсят в gonet-эндпоинт.
+  Мост `linkTun` (tun.Device ↔ channel.Endpoint) по образцу wireguard-go/netstack.
+  Без TUN-устройства, kernel-wg, iptables MASQUERADE и **без root** → VPS-процесс
+  остаётся non-root, SSRF-guard вешается на `Dial`.
+- **Result:** `TestGatewayExit` — wireguard-go клиент на netstack-TUN → in-memory
+  carrier → `wggw.Gateway` → реальный host-HTTP-сервер. Путь HTTP→WG→carrier→WG→
+  gvisor-forwarder→net.Dial→HTTP, тело `exit-ok`. PASS, `-race` ×2.
+- **Грабли:** gvisor дропает «martian» loopback-dst (`127.0.0.1`) на обычном NIC —
+  в тесте роутим `192.0.2.10` (TEST-NET-1), а `Dial` маппит на реальный сервер
+  (в проде dst — настоящий внешний IP, проблемы нет).
+- **Conclusion:** серверная замена `KCP/smux/SOCKS` → `wggw` рабочая и тестируется
+  локально. Выход non-root, SSRF-guard переиспользуется.
+- **Next:** (1) вшить `wggw` в `cmd/server` поверх текущего PSK-DTLS-листенера +
+  SSRF-guard в `Dial`; (2) клиент: carrier из реального TURN+DTLS → `wgbind`+netstack,
+  локальный SOCKS5 поверх netstack (клиент остаётся без root) ИЛИ реальный TUN для
+  whole-device; (3) прогнать поверх **реального** DTLS (loopback) до VPS; (4) редеплой.
+
+## 2026-11-19 — РАЗВОРОТ на WireGuard: make-or-break — WG едет поверх carrier-conn ✅
+
+**Stage:** Stage 4/8 (WireGuard) · **Verdict:** ✅ механизм доказан в юнит-тесте,
+`-race` чисто (3×)
+
+- **Решение:** полностью заменить data plane `KCP→smux→SOCKS5` на **WireGuard**.
+  TURN+DTLS остаются несущим слоем (сырой UDP WG реле дропнет — тот же M0-негатив),
+  WG едет **внутри** DTLS-датаграм-канала. Начинаем с VPS-выхода.
+- **Make-or-break:** поедет ли `wireguard-go` поверх произвольного `net.Conn`
+  (нашего карьера), а не UDP-сокета? **Да.**
+- **Tried:** `internal/wgbind` — `conn.Bind` поверх одного датаграм-`net.Conn`
+  (один карьер = один пир; `Send`→`Write`, receive→`Read`). Тонкость: wireguard-go
+  дёргает `Bind.Close()`+`Open()` на каждом reconfigure/Up, ожидая пересоздания
+  транспорта. Карьер пересоздать нельзя → `Close()` **не** закрывает conn, а снимает
+  in-flight receive через read-deadline; `Open()` дедлайн сбрасывает; сам conn
+  закрывает владелец (туннель). Это штатно работает на pion/dtls (нативный
+  SetReadDeadline).
+- **Result:** `TestWireGuardOverCarrier` — два `wireguard-go` девайса на netstack-TUN
+  (без root, без UDP-сокета, без реального TUN), HTTP GET клиент→сервер сквозь WG
+  поверх in-memory датаграм-пары → тело `hello-through-wireguard`. PASS, `-race` ×3.
+- **Evidence:** `go test ./internal/wgbind/ -race -count=3` → ok 5.7s.
+- **Conclusion:** связка `TURN → DTLS → WireGuard → netstack` рабочая. netstack-TUN
+  даёт выход **без root** на клиенте (снимает минус WG про root на десктопе — для
+  прокси-режима; whole-device через реальный TUN остаётся отдельным опционом).
+- **Next:** (1) серверный WG-путь на VPS: терминируем DTLS (PSK как сейчас) → релеим
+  датаграммы в локальный kernel-wg (`wg0` + ip_forward + MASQUERADE), процесс остаётся
+  non-root; (2) клиентский спайк поверх **реального** TURN+DTLS карьера с netstack-TUN
+  → проверить exit-IP = VPS; (3) редеплой VPS (заменит текущий mux-сервер — подтвердить).
+
 ## 2026-11-19 — Hardening-2: per-client auth, Keystore, ротация, footprint-шейп, десктопный UDP
 
 **Stage:** Hardening (P0.3/P0.4/P2.2/P2.3 + Stage 7 десктоп) · **Verdict:** ✅ сделано,
