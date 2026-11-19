@@ -18,8 +18,10 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/pion/dtls/v3"
@@ -42,6 +44,7 @@ func main() {
 	shape := flag.String("shape", "", "footprint-shape outbound bitrate cap, e.g. 2mbit (empty = unlimited)")
 	exitMode := flag.String("exit", "userspace", "exit data plane: 'userspace' (gVisor netstack, non-root, SSRF-safe) or 'kernel' (relay to a kernel wg0; needs scripts/kernel-exit-setup.sh)")
 	wgPort := flag.Int("wg-port", 51820, "with -exit kernel: the kernel WireGuard listen port on localhost to relay into")
+	wgIf := flag.String("wg-if", "wg0", "with -exit kernel: the kernel WireGuard interface to reconcile peers on")
 	genKey := flag.Bool("genkey", false, "print a fresh WireGuard keypair and exit")
 	flag.Parse()
 
@@ -110,6 +113,18 @@ func main() {
 			log.Fatal("server: -shape is a userspace-exit feature; shape the kernel exit with tc instead")
 		}
 		log.Printf("server: kernel WireGuard exit — relaying into 127.0.0.1:%d (ensure wg0 + nft egress filter are up)", *wgPort)
+		// Optional: if a peers file is given, the server owns peer membership on
+		// wg0 — it reconciles the file into the interface at startup and again on
+		// SIGHUP, so clients are added/revoked by editing the file and sending
+		// `kill -HUP`, with no restart. Without a peers file, membership is left to
+		// whatever scripts/kernel-exit-setup.sh programmed (static).
+		if *wgPeersPath != "" || os.Getenv("TURNVPN_WG_PEERS") != "" {
+			reconcile := kernelPeerReconciler(kernelexit.NewWGCLI(), *wgIf, *wgPeersPath)
+			if err := reconcile(); err != nil {
+				log.Fatalf("server: kernel peers: %v", err)
+			}
+			watchSIGHUP(reconcile, *wgIf)
+		}
 	}
 
 	laddr, err := net.ResolveUDPAddr("udp", *listen)
@@ -237,6 +252,42 @@ func (a *activityConn) Read(p []byte) (int, error) {
 		a.touch()
 	}
 	return n, err
+}
+
+// kernelPeerReconciler returns a function that reloads the peers file and makes
+// the kernel wg interface's peer set match it. Re-reading on each call is what
+// makes SIGHUP pick up edits.
+func kernelPeerReconciler(cli kernelexit.WGClient, ifname, peersPath string) func() error {
+	return func() error {
+		wp, err := loadWGPeers(peersPath)
+		if err != nil {
+			return err
+		}
+		peers := make([]kernelexit.Peer, len(wp))
+		for i, p := range wp {
+			peers[i] = kernelexit.Peer{PubKeyHex: p.PubKey, AllowedIP: p.AllowedIP}
+		}
+		if err := kernelexit.Reconcile(cli, ifname, peers); err != nil {
+			return err
+		}
+		log.Printf("server: reconciled %d peer(s) on %s", len(peers), ifname)
+		return nil
+	}
+}
+
+// watchSIGHUP re-runs reconcile whenever the process receives SIGHUP, logging but
+// not dying on a reconcile error (a bad edit shouldn't drop live tunnels).
+func watchSIGHUP(reconcile func() error, ifname string) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	go func() {
+		for range ch {
+			log.Printf("server: SIGHUP — reloading peers for %s", ifname)
+			if err := reconcile(); err != nil {
+				log.Printf("server: reload failed (keeping previous peers): %v", err)
+			}
+		}
+	}()
 }
 
 // loadKeyring parses a DTLS keyring file: one "identity secret" per line, blank

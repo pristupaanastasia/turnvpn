@@ -35,6 +35,30 @@ TURN-серверы за звонками VK — в белом списке (о�
                                                           └───────────────┘
 ```
 
+### Серверный выход — сменный (`-exit`)
+
+Идентичность клиента = его WireGuard-pubkey и развязана с транспортом, поэтому
+**выход можно менять, не трогая клиента и протокол** (carrier один и тот же):
+
+```
+          DTLS (взаимный PSK)  ─►  идентичность клиента = WG-pubkey
+                                          │
+                 ┌────────────────────────┴────────────────────────┐
+      -exit userspace (по умолчанию)                  -exit kernel (вариант B)
+   ┌───────────────────────────────┐          ┌───────────────────────────────┐
+   │ internal/wggw                 │          │ internal/kernelexit           │
+   │  gVisor-netstack (userspace)  │          │  релей WG-датаграмм в ядро     │
+   │  → net.Dial (явный фильтр)    │          │  → wg0 (kernel WireGuard)      │
+   │                               │          │  → nftables: MASQUERADE        │
+   │  non-root · SSRF-safe         │          │    + egress-фильтр (анти-SSRF) │
+   │  ~2–5 МБ/клиент               │          │  пиры: reconcile по SIGHUP     │
+   │                               │          │  ~0.2 МБ/клиент · нужен root    │
+   └───────────────┬───────────────┘          └───────────────┬───────────────┘
+                   └───────────►  открытый интернет  ◄─────────┘
+```
+
+Детали варианта B и его обязательный egress-фильтр — в `docs/kernel-exit.md`.
+
 Креды для реле берём из дескриптора join'а реального звонка
 (`turn_server {username, credential, urls}`), который достаётся REST-цепочкой VK/OK
 (`get_anonym_token` → `getAnonymousToken` → `anonymLogin` → `joinConversationByLink`).
@@ -220,6 +244,31 @@ egresses to the internet. Locally the client exposes a SOCKS5 proxy.
 └──────────────────────────────┘                          │ → dial target │
                                                           └───────────────┘
 ```
+
+### Server exit — pluggable (`-exit`)
+
+A client's identity is its WireGuard public key, decoupled from the transport, so
+**the exit can be swapped without touching the client or the protocol** (the
+carrier is identical):
+
+```
+          DTLS (mutual PSK)  ─►  client identity = WG pubkey
+                                        │
+                 ┌──────────────────────┴──────────────────────┐
+      -exit userspace (default)                      -exit kernel (variant B)
+   ┌───────────────────────────────┐          ┌───────────────────────────────┐
+   │ internal/wggw                 │          │ internal/kernelexit           │
+   │  gVisor netstack (userspace)  │          │  relay WG datagrams to kernel  │
+   │  → net.Dial (explicit filter) │          │  → wg0 (kernel WireGuard)      │
+   │                               │          │  → nftables: MASQUERADE        │
+   │  non-root · SSRF-safe         │          │    + egress filter (anti-SSRF) │
+   │  ~2–5 MB/client               │          │  peers: reconcile on SIGHUP    │
+   │                               │          │  ~0.2 MB/client · needs root   │
+   └───────────────┬───────────────┘          └───────────────┬───────────────┘
+                   └───────────►  open internet  ◄─────────────┘
+```
+
+Variant B and its mandatory egress filter are documented in `docs/kernel-exit.md`.
 
 Relay credentials come from a real call's join descriptor
 (`turn_server {username, credential, urls}`), fetched via the VK/OK REST chain
