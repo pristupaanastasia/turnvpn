@@ -75,6 +75,9 @@ type Config struct {
 
 	// Logf logs forwarding errors; default no-op.
 	Logf func(string, ...any)
+
+	// Shape paces outbound WireGuard emission to at most this many bytes/sec. 0 = off.
+	Shape int
 }
 
 // Gateway is a running WireGuard exit over one carrier conn.
@@ -142,7 +145,7 @@ func New(carrier net.Conn, cfg Config) (*Gateway, error) {
 		stk.Close()
 		return nil, fmt.Errorf("wggw: no peers configured")
 	}
-	dev := device.NewDevice(link, wgbind.New(carrier), device.NewLogger(device.LogLevelError, "wggw "))
+	dev := device.NewDevice(link, wgbind.NewWithRate(carrier, cfg.Shape), device.NewLogger(device.LogLevelError, "wggw "))
 	var uapi strings.Builder
 	fmt.Fprintf(&uapi, "private_key=%s\nlisten_port=0\nreplace_peers=true\n", cfg.ServerPrivKey)
 	for _, p := range cfg.Peers {
