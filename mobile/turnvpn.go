@@ -50,7 +50,7 @@ func closeAll(cs []io.Closer) {
 //	wgAddr      — this device's WireGuard tunnel address (e.g. "10.6.0.2")
 //
 // It returns an error if already running or on setup failure.
-func Start(tunFd, mtu int, peer, secret, vkLink, token, appKey, wgKey, wgServerPub, wgAddr string) error {
+func Start(tunFd, mtu int, peer, secret, vkLink, token, appKey, wgKey, wgServerPub, wgAddr, identity string) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.running {
@@ -67,10 +67,11 @@ func Start(tunFd, mtu int, peer, secret, vkLink, token, appKey, wgKey, wgServerP
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	carrierConn, closers, err := carrier.Dial(ctx, carrier.Config{
-		Peer:   peerAddr,
-		Secret: secret,
-		Creds:  carrier.TokenCreds(appKey, vkLink, token),
-		Logf:   GoLog,
+		Peer:     peerAddr,
+		Secret:   secret,
+		Identity: identity, // "" = single-secret mode
+		Creds:    carrier.TokenCreds(appKey, vkLink, token),
+		Logf:     GoLog,
 	})
 	if err != nil {
 		return err

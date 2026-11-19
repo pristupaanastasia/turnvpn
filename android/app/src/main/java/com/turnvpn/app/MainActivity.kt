@@ -28,6 +28,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var link: EditText
     private lateinit var token: EditText
     private lateinit var serverPub: EditText
+    private lateinit var identity: EditText
     private lateinit var devicePubkey: TextView
 
     private lateinit var connectBtn: MaterialButton
@@ -60,6 +61,7 @@ class MainActivity : AppCompatActivity() {
         link = findViewById(R.id.link)
         token = findViewById(R.id.token)
         serverPub = findViewById(R.id.server_pub)
+        identity = findViewById(R.id.identity)
         devicePubkey = findViewById(R.id.device_pubkey)
         connectBtn = findViewById(R.id.connect)
         disconnectBtn = findViewById(R.id.disconnect)
@@ -168,6 +170,7 @@ class MainActivity : AppCompatActivity() {
             .putExtra(TurnvpnService.EXTRA_WGKEY, prefs().getString("wgkey", ""))
             .putExtra(TurnvpnService.EXTRA_WGSERVERPUB, serverPub.text.toString().trim())
             .putExtra(TurnvpnService.EXTRA_WGADDR, TurnvpnService.DEFAULT_WGADDR)
+            .putExtra(TurnvpnService.EXTRA_IDENTITY, identity.text.toString().trim())
         startService(intent)
     }
 
@@ -195,6 +198,7 @@ class MainActivity : AppCompatActivity() {
         link.setText(p.getString("link", ""))
         token.setText(p.getString("token", ""))
         serverPub.setText(p.getString("server_pub", ""))
+        identity.setText(p.getString("identity", ""))
         devicePubkey.text = "ключ этого устройства (в peers сервера):\n" + p.getString("wgpub", "")
     }
 
@@ -205,6 +209,7 @@ class MainActivity : AppCompatActivity() {
             .putString("link", link.text.toString().trim())
             .putString("token", token.text.toString().trim())
             .putString("server_pub", serverPub.text.toString().trim())
+            .putString("identity", identity.text.toString().trim())
             .apply()
     }
 

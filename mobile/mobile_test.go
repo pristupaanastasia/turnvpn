@@ -31,7 +31,7 @@ func TestGenerateWGKeypair(t *testing.T) {
 func TestStartRejectsBadPeer(t *testing.T) {
 	// A malformed peer address fails fast, before any carrier work; also exercises
 	// the makeTUN stub path on non-Android hosts.
-	err := Start(0, 1280, "not a host:port", "secret", "link", "token", "appkey", "aa", "bb", "10.6.0.2")
+	err := Start(0, 1280, "not a host:port", "secret", "link", "token", "appkey", "aa", "bb", "10.6.0.2", "")
 	if err == nil {
 		t.Error("Start with a bad peer should error")
 	}
