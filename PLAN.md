@@ -99,10 +99,20 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
 - [x] **Проверено:** `curl --socks5-hostname …` → exit-IP = VPS; `example.com` → `HTTP/2 200`.
       Реальный браузинг через TURN ВК (из белого списка) работает **без WireGuard, без root**.
 
-### Stage 4 — (опц.) WireGuard поверх туннеля
-- [ ] Если нужен **весь** трафик машины (не только прокси-приложения): WG-клиент →
-      локальный UDP клиента → туннель → WG-сервер на VPS → MASQUERADE. SOCKS-варианта
-      хватает для веба; WG — апгрейд при желании.
+### Stage 4 — WireGuard как data plane  ✅ **ПРОЙДЕН (локально, 2026-11-19)** ⬅️ **СЕЙЧАС ЗДЕСЬ**
+Разворот: `KCP/smux/SOCKS` поверх DTLS заменены на **WireGuard** (внутри того же
+DTLS-over-TURN carrier — сырой WG реле дропнет). Всё в userspace на gvisor-netstack,
+**без root/TUN**.
+- [x] `internal/wgbind` — `conn.Bind`, возящий WG поверх carrier-`net.Conn`.
+- [x] `internal/wggw` — серверный WG-выход: netstack(promiscuous) + TCP/UDP-форвардеры
+      → `net.Dial` в интернет; SSRF-guard по умолчанию; non-root.
+- [x] `internal/wgclient` — клиентский WG на netstack + `DialContext` с remote-DNS.
+- [x] `cmd/server`/`cmd/client` переписаны на WG (DTLS-PSK carrier/auth сохранён);
+      ключи — `-genkey`/`-wg-key`/`-wg-peers`/`-wg-server-pub`.
+- [x] Доказано локально: `TestClientDialThroughGateway`, `TestGatewayOverRealDTLS`
+      (поверх настоящего pion/dtls), `-race` чисто.
+- [ ] Редеплой VPS (заменит mux-сервер) + проверка через реальный TURN-реле.
+- [ ] Удалить мёртвые `internal/mux`/`internal/tunnel` после миграции Android.
 
 ### Stage 5 — устойчивость  ✅ **ПРОЙДЕН**
 - [x] Пул параллельных туннелей для throughput (`-tunnels N`, round-robin).
@@ -127,11 +137,12 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
       `internal/tunnel/udpflow.go`) — UDP теперь не только через mobile/tun2socks.
       Покрыто `TestUDPRelay`, `TestLaneDatagramAndStream`.
 
-### Stage 8 — (опц.) вся машина через WireGuard
-- [ ] Для **всего** трафика машины (не только прокси-аппов): WG-клиент → локальный
-      UDP клиента → туннель → WG-сервер на VPS → MASQUERADE. SOCKS хватает для веба.
+### Stage 8 — (опц.) whole-device через реальный TUN
+- [ ] Сейчас WG-клиент крутится на userspace-netstack + локальный SOCKS5 (без root).
+      Для **всего** трафика машины (не только прокси-аппов) — поднять WG на реальном
+      TUN-устройстве (нужен root/caps). netstack+SOCKS хватает для веба.
 
-### Stage 9 — footprint + живучесть звонка  🔶 **ЧАСТИЧНО** ⬅️ **СЕЙЧАС ЗДЕСЬ**
+### Stage 9 — footprint + живучесть звонка  🔶 **ЧАСТИЧНО**
 - [x] Шейп битрейта (P2.3): token-bucket пейсит эмиссию DTLS под кап (`-shape 2mbit`,
       `internal/mux/shaper.go`). Ротация эндпоинтов (P2.2): `cmd/client -peer` —
       список через запятую, туннели round-robin по выходам.
@@ -184,16 +195,20 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
 
 ## Репо
 
-- `cmd/client` — клиент (Mac): достаёт `turn_server` из звонка → TURN Allocate +
-  DTLS сквозь реле → пул туннелей → локальный SOCKS5 (CONNECT + UDP ASSOCIATE).
-- `cmd/server` — выход (VPS): DTLS → mux/lane → SSRF-фильтр → dial цели (TCP/UDP).
+- `cmd/client` — клиент (Mac): `turn_server` из звонка → TURN Allocate + DTLS сквозь
+  реле → **WireGuard** (`wgclient`) → локальный SOCKS5 (CONNECT + UDP ASSOCIATE).
+- `cmd/server` — выход (VPS): DTLS → **WireGuard-gateway** (`wggw`) → dial в интернет.
 - `internal/okapi`, `internal/vkapi` — VK/OK REST-цепочка до `turn_server`.
-- `internal/mux` — KCP+smux + `Lane` (тег-демукс reliable/unreliable) + footprint-шейп.
-- `internal/tunnel` — реле потоков/flow на сервере + клиентские UDP-flow; SSRF-guard.
+- `internal/wgbind` — `conn.Bind`: WireGuard поверх carrier-`net.Conn` (DTLS/TURN).
+- `internal/wggw` — серверный WG-выход (netstack promiscuous + форвардеры + SSRF-guard).
+- `internal/wgclient` — клиентский WG на netstack + `DialContext` (remote-DNS).
+- `internal/wgkey` — генерация/деривация WG-ключей (Curve25519, hex).
 - `internal/socks` — SOCKS5 CONNECT + UDP ASSOCIATE, per-stream target-заголовок.
 - `internal/authdtls` — взаимная PSK-аутентификация DTLS (ECDHE-PSK) + keyring.
-- `internal/vpntun` — туннель как `Dialer` для mobile/tun2socks.
-- `mobile/`, `android/` — gomobile `.aar` + Kotlin-приложение **HolubVPN**.
+- `internal/mux`, `internal/tunnel` — **legacy** KCP/smux/lane data plane; остались
+  только под mobile (`internal/vpntun`), удалятся после миграции Android на WG.
+- `internal/vpntun`, `mobile/`, `android/` — старый `Dialer` + gomobile `.aar` +
+  Kotlin **HolubVPN** (ещё на старом протоколе).
 - `internal/graceful`, `internal/dotenv` — инфра (signal ctx, .env).
 - `internal/captcha` — решатель капчи (**WIP пользователя**, не часть моего кода;
   подключается как `CaptchaSolver` через интерфейс).

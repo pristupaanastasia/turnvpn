@@ -6,6 +6,30 @@
 
 ---
 
+## 2026-11-19 — WireGuard: десктоп end-to-end (сервер+клиент) заменил KCP/smux/SOCKS ✅ (локально)
+
+**Stage:** Stage 4/8 (WireGuard, десктоп) · **Verdict:** ✅ полный путь клиент↔сервер
+заменён на WG, доказан локально (вкл. реальный DTLS), `-race` чисто; VPS ещё не тронут
+
+- **Tried:** довёл разворот до конца на десктопе. `internal/wgclient` — клиентский WG
+  поверх carrier на netstack (без root/TUN) + `DialContext` с резолвом имён по DNS
+  **через туннель** (remote DNS). `cmd/server` переписан на `wggw.Gateway`
+  (DTLS-PSK остаётся как carrier/auth; idle-watchdog по keepalive сбрасывает мёртвый
+  туннель; `-wg-key`/`-wg-peers`/`-genkey`). `cmd/client` переписан: тот же TURN+DTLS
+  + creds/captcha, но data plane = `wgclient`; локальный SOCKS5 (CONNECT→netstack TCP,
+  UDP ASSOCIATE→netstack UDP), проактивный ре-establish до протухания кредов.
+  `internal/wgkey` — генерация/деривация WG-ключей.
+- **Result:** `TestClientDialThroughGateway` (wgclient→wggw, HTTP, `-race`),
+  `TestGatewayOverRealDTLS` (поверх настоящего pion/dtls), `TestGatewayExit`,
+  `TestWireGuardOverCarrier` — все зелёные. `go build/vet/test ./...` ок.
+- **Conclusion:** десктоп-стек `TURN→DTLS→WireGuard→VPS-exit` рабочий и целиком
+  тестируется локально. Выход non-root (userspace netstack-gateway), SSRF-guard
+  по умолчанию. Единственное непротестированное локально звено — сам TURN-реле
+  посередине (прозрачный DTLS-форвард, низкий риск).
+- **Осталось:** редеплой VPS (заменит mux-сервер — с подтверждением); Android
+  (`internal/vpntun`) всё ещё на старом mux/tunnel — миграция на WG отдельно; затем
+  удаление мёртвых `internal/mux`/`internal/tunnel`.
+
 ## 2026-11-19 — WireGuard: userspace exit-gateway форвардит в интернет ✅ (локально)
 
 **Stage:** Stage 4/8 (WireGuard, серверная часть) · **Verdict:** ✅ полный серверный

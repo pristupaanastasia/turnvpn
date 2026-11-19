@@ -17,19 +17,20 @@ TURN-серверы за звонками VK — в белом списке (о�
 Они форвардят UDP на **один** привязанный к аллокации пир — если это VPS в открытом
 интернете, реле становится «ступенькой» наружу из белого списка. Реле пропускает
 только то, что похоже на WebRTC-медиа, поэтому всё заворачивается в **DTLS** (им
-оборачиваются настоящие звонки). Поверх — надёжный мультиплексированный транспорт,
-наружу — локальный SOCKS5-прокси.
+оборачиваются настоящие звонки). Внутри DTLS бежит **WireGuard**: клиент — на нём
+через userspace-стек (без root/TUN), выход на VPS терминирует WireGuard и выпускает
+трафик в интернет. Наружу на клиенте — локальный SOCKS5-прокси.
 
 ```
   machine inside the whitelist                               open internet
 ┌──────────────────────────────┐                          ┌───────────────┐
 │ browser / app                │                          │  any website  │
 │   │ SOCKS5  127.0.0.1:1080   │                          └──────▲────────┘
-│   ▼                          │                                 │ TCP
+│   ▼                          │                                 │ TCP/UDP
 │ cmd/client                   │        VK TURN relay     ┌──────┴────────┐
-│   pool of N tunnels, each:   │      (whitelisted IP)    │ cmd/server    │
-│   smux → KCP → DTLS ─────────┼──► ChannelData ──► UDP ─►│  (your VPS)   │
-│   over a pion/turn alloc     │   (looks like media)     │ DTLS→KCP→smux │
+│   WireGuard (userspace)      │      (whitelisted IP)    │ cmd/server    │
+│   → DTLS ────────────────────┼──► ChannelData ──► UDP ─►│  (your VPS)   │
+│   over a pion/turn alloc     │   (looks like media)     │ DTLS→WireGuard│
 └──────────────────────────────┘                          │ → dial target │
                                                           └───────────────┘
 ```
@@ -47,10 +48,9 @@ TURN-серверы за звонками VK — в белом списке (о�
 ```
 TURN ChannelData          — адресация реле; неотличимо от WebRTC-медиа
   └ DTLS 1.2 record       — AEAD ChaCha20-Poly1305, ECDHE-PSK (взаимная аутентификация)
-      └ KCP segment       — надёжный ARQ (без крипты; DTLS уже шифрует)
-          └ smux frame    — мультиплексирование потоков
-              └ полезная нагрузка: заголовок "host:port" + проксируемый TCP-поток
-                 (обычно сам по себе TLS/HTTPS, end-to-end до реального сайта)
+      └ WireGuard         — Noise/ChaCha20-Poly1305: второй шифр + маршрутизация
+          └ IP-пакеты     — TCP/UDP приложения (веб обычно сам по себе TLS/HTTPS,
+                            end-to-end до реального сайта)
 ```
 
 **Что даёт DTLS**
@@ -69,68 +69,79 @@ TURN ChannelData          — адресация реле; неотличимо 
 - **Маскировка.** DTLS — ровно то, во что обёрнуто WebRTC-медиа, поэтому реле его
   форвардит; сырые байты data plane реле молча дропает. Эта обёртка и делает весь
   подход рабочим.
-- KCP специально **без** крипты (`NoneBlockCrypt`): DTLS уже шифрует датаграмму,
-  второй шифр только жёг бы CPU.
+- **WireGuard внутри** добавляет собственную взаимную аутентификацию по ключам и
+  второй шифр (Noise + ChaCha20-Poly1305), и заодно маршрутизирует IP-пакеты до
+  выхода. Сырой WireGuard реле бы дропнуло — поэтому он едет внутри DTLS, а не вместо.
 
-**Эшелонированная защита.** DTLS уже аутентифицирует оба конца, но payload
-**дополнительно** защищён прикладным слоем: веб — это HTTPS, т.е. вторая,
-аутентифицированная TLS-сессия end-to-end до самого сайта — VPS и реле видят только
-этот внутренний TLS-шифротекст, а не исходный plaintext. Итог: трафик зашифрован
-**дважды** поверх недоверенного реле, а адрес назначения в открытую виден только
-собственному VPS.
+**Эшелонированная защита.** Поверх недоверенного реле трафик зашифрован в несколько
+слоёв: внешний DTLS (ECDHE-PSK) + внутренний WireGuard (ключи), а для веба ещё и
+HTTPS — третья, аутентифицированная TLS-сессия end-to-end до самого сайта, которую
+ни реле, ни даже собственный VPS расшифровать не могут. Адрес назначения в открытую
+виден только собственному VPS.
 
-**Выход — не открытый релей наружу (SSRF-guard).** Цель потока диктует клиент, но
-сервер отклоняет loopback, приватные, link-local и metadata-адреса
-(`169.254.169.254`) и диалит по уже проверенному IP — чтобы туннель нельзя было
-навести на внутренние сервисы VPS или облачную метадату (и чтобы DNS-rebinding не
-проскочил между проверкой и диалом). См. `internal/tunnel`.
+**Выход — не открытый релей наружу (SSRF-guard).** Цель диктует клиент, но выход
+отклоняет loopback, приватные, link-local и metadata-адреса (`169.254.169.254`) и
+диалит по уже проверенному IP — чтобы туннель нельзя было навести на внутренние
+сервисы VPS или облачную метадату (и чтобы DNS-rebinding не проскочил между
+проверкой и диалом). SSRF-guard включён по умолчанию. См. `internal/wggw`.
 
 **Чего это всё равно НЕ скрывает: сам факт туннеля.** Payload зашифрован и
 аутентифицирован, но устойчиво тяжёлый трафик через «звонок» и TURN-аллокация с
 egress'ом на внешний IP палятся трафик-анализом. Шифрование защищает *что* передаётся,
-а не *факт* работы туннеля. Footprint можно снижать — шейп битрейта (`-shape`) и
-ротация выходов (`-peer` списком) уже есть, — но на невидимость рассчитывать не стоит.
+а не *факт* работы туннеля. Footprint можно снижать (напр. ротация выходов `-peer`
+списком), но на невидимость рассчитывать не стоит.
 
 ## Компоненты
 
-- `cmd/client` — локальный SOCKS5-прокси (CONNECT + UDP ASSOCIATE); держит пул
-  туннелей, каждый `smux → KCP → DTLS` поверх `pion/turn`-аллокации. Фоновый менеджер
-  обновляет креды каждого туннеля до их протухания. `-peer` через запятую раскладывает
-  туннели по нескольким выходам (ротация).
-- `cmd/server` — на VPS: терминирует DTLS, демультиплексирует потоки, фильтрует цель
-  (SSRF-guard) и набирает её в открытом интернете (TCP и UDP), качает обратно.
+- `cmd/client` — локальный SOCKS5-прокси (CONNECT + UDP ASSOCIATE); поверх DTLS/TURN
+  поднимает WireGuard (`wgclient`) и диалит через него. Фоновый менеджер
+  переустанавливает туннель до протухания кредов; `-peer` через запятую — ротация выходов.
+- `cmd/server` — на VPS: терминирует DTLS и гоняет WireGuard-выход (`wggw`), который
+  набирает цель в открытом интернете (SSRF-guard по умолчанию) и качает обратно.
 - `internal/okapi`, `internal/vkapi` — REST-цепочка VK/OK, дающая креды `turn_server`.
-- `internal/mux` — KCP + smux поверх одного DTLS-соединения + `Lane` (тег-демукс на
-  надёжную дорожку для TCP и ненадёжную датаграммную для QUIC/UDP) + шейп битрейта.
-- `internal/tunnel` — реле потоков и UDP-flow + `SSRF-guard` (блок loopback/приватных/
-  link-local/metadata-адресов, диал по проверенному IP).
+- `internal/wgbind` — `conn.Bind`: WireGuard поверх carrier-`net.Conn` (DTLS/TURN).
+- `internal/wggw` — серверный WG-выход: gvisor-netstack (promiscuous) + TCP/UDP-форвардеры.
+- `internal/wgclient` — клиентский WG на netstack + `DialContext` (resolve через туннель).
+- `internal/wgkey` — генерация/деривация WG-ключей (Curve25519, hex).
 - `internal/socks` — SOCKS5 CONNECT и UDP ASSOCIATE + per-stream target-заголовок.
 - `internal/authdtls` — взаимная PSK-аутентификация DTLS (ECDHE-PSK); поддерживает
   как единый `-secret`, так и per-client keyring (identity→secret) с отзывом.
-- `internal/vpntun`, `mobile/` — туннель как `Dialer` + gomobile-биндинг для Android.
+- `internal/mux`, `internal/tunnel` — **legacy** KCP/smux data plane; используются
+  только мобильным `internal/vpntun` (Android ещё на старом протоколе).
 - `internal/captcha` — пользовательский добытчик кредов (с решением капчи), втыкается
   в seam `CredsFunc` клиента. **Не часть ядра**; turnvpn сам капчу не решает.
 
 ## Запуск
 
-Общий секрет задаётся на **обеих** сторонах (`-secret` или `TURNVPN_SECRET`) — он
-взаимно аутентифицирует туннель, чтобы выход не был открытым прокси.
-
-На VPS (открой UDP-порт в фаерволе):
+Два уровня аутентификации: **DTLS-секрет** (`-secret`/`TURNVPN_SECRET`) на обеих
+сторонах аутентифицирует carrier, а **ключи WireGuard** — сам туннель. Сначала
+сгенерируй по паре ключей:
 
 ```sh
-go build -o server ./cmd/server
-TURNVPN_SECRET='<общий секрет>' ./server -listen 0.0.0.0:56000
+go build -o server ./cmd/server && go build -o client ./cmd/client
+./server -genkey   # → server private + public
+./client -genkey   # → client private + public
+```
+
+На VPS: приватный ключ сервера + файл пиров (`<публичный ключ клиента> <его адрес>`
+на строку) + DTLS-секрет (открой UDP-порт в фаерволе):
+
+```sh
+echo '<публичный ключ клиента> 10.6.0.2/32' > peers.txt
+echo '<приватный ключ сервера>' > wg.key
+TURNVPN_SECRET='<общий секрет>' ./server \
+  -listen 0.0.0.0:56000 -wg-key wg.key -wg-peers peers.txt
 ```
 
 На клиентской машине (с per-call токеном, снятым из браузерного звонка):
 
 ```sh
-go build -o client ./cmd/client
-TURNVPN_SECRET='<тот же секрет>' TURN_CALL_TOKEN='<call-token>' ./client \
+TURNVPN_SECRET='<тот же секрет>' TURN_CALL_TOKEN='<call-token>' \
+TURNVPN_WG_KEY='<приватный ключ клиента>' TURNVPN_WG_SERVER_PUB='<публичный ключ сервера>' \
+./client \
   -peer <IP_VPS>:56000 \
   -vk-link <токен из vk.ru/call/join/...> \
-  -tunnels 2
+  -wg-addr 10.6.0.2
 ```
 
 После запуска клиент поднимает локальный **SOCKS5-прокси на `127.0.0.1:1080`**. Его
@@ -147,15 +158,14 @@ DNS-запросы через прокси при использовании SOC
 решателя капчи), который поставляет пользователь.
 
 QUIC/HTTP-3 и прочий UDP идут через туннель наравне с TCP (SOCKS5 UDP ASSOCIATE на
-клиенте, ненадёжная датаграммная дорожка внутри). DNS резолвится на VPS.
+клиенте). DNS резолвится на VPS (WireGuard несёт весь IP, имена резолвятся на выходе).
 
 **Опциональные флаги:**
 
-- `-peer a:56000,b:56000` — несколько выходов; туннели раскладываются по ним ротацией.
-- `-shape 2mbit` (обе стороны) — шейп исходящего битрейта под «конверт» звонка.
-- Per-client доступ вместо единого секрета: на сервере `-keyring file`
-  (строки `identity secret`), у клиента `-identity <id>`. Отзыв клиента — удалить его
-  строку и перезапустить сервер.
+- `-peer a:56000,b:56000` — несколько выходов; туннель ротируется по ним при переподключении.
+- Несколько клиентов: добавь по строке на каждого в `-wg-peers` (у каждого свой
+  `-wg-addr`). Дополнительно можно включить per-client DTLS-доступ: на сервере
+  `-keyring file` (строки `identity secret`), у клиента `-identity <id>`.
 
 ## Android
 
@@ -165,9 +175,11 @@ QUIC/HTTP-3 и прочий UDP идут через туннель наравн�
 
 ## Статус
 
-Vector 1 (TURN-реле + DTLS + SOCKS5) **работает end-to-end**: реальный HTTPS-браузинг
-и QUIC/HTTP-3 выходят через VPS по инфраструктуре VK из белых списков, с пулом
-туннелей и проактивным обновлением кредов. Поднят харденинг: взаимная аутентификация
+Vector 1 (TURN-реле + DTLS + **WireGuard**) **работает end-to-end**: реальный
+HTTPS-браузинг и QUIC/HTTP-3 выходят через VPS по инфраструктуре VK из белых списков,
+с проактивным обновлением кредов. Data plane переведён с KCP/smux/SOCKS на WireGuard
+(десктоп готов и проверен локально; Android пока на старом протоколе). Поднят
+харденинг: взаимная аутентификация
 (единый секрет или per-client keyring), SSRF-guard на выходе, non-root systemd на
 VPS, секрет в Keystore на Android, шейп битрейта и ротация выходов. Полная история —
 в `PLAN.md` и `LAB.md`, включая удалённый (в git-истории) ранний media-RTP подход.
@@ -187,19 +199,20 @@ The TURN servers behind VK's calls are whitelisted (the approved app needs them)
 They forward UDP to one peer you bind — if that peer is your own VPS out on the
 open internet, the relay becomes a stepping stone out of the whitelist. The relay
 only forwards packets that look like WebRTC media, so we wrap everything in
-**DTLS** (what real calls use). On top we run a reliable, multiplexed transport
-and expose it locally as a SOCKS5 proxy.
+**DTLS** (what real calls use). Inside the DTLS we run **WireGuard**: the client
+on a userspace stack (no TUN, no root), and the VPS exit terminates WireGuard and
+egresses to the internet. Locally the client exposes a SOCKS5 proxy.
 
 ```
   machine inside the whitelist                               open internet
 ┌──────────────────────────────┐                          ┌───────────────┐
 │ browser / app                │                          │  any website  │
 │   │ SOCKS5  127.0.0.1:1080   │                          └──────▲────────┘
-│   ▼                          │                                 │ TCP
+│   ▼                          │                                 │ TCP/UDP
 │ cmd/client                   │        VK TURN relay     ┌──────┴────────┐
-│   pool of N tunnels, each:   │      (whitelisted IP)    │ cmd/server    │
-│   smux → KCP → DTLS ─────────┼──► ChannelData ──► UDP ─►│  (your VPS)   │
-│   over a pion/turn alloc     │   (looks like media)     │ DTLS→KCP→smux │
+│   WireGuard (userspace)      │      (whitelisted IP)    │ cmd/server    │
+│   → DTLS ────────────────────┼──► ChannelData ──► UDP ─►│  (your VPS)   │
+│   over a pion/turn alloc     │   (looks like media)     │ DTLS→WireGuard│
 └──────────────────────────────┘                          │ → dial target │
                                                           └───────────────┘
 ```
@@ -218,10 +231,9 @@ Each tunnel datagram is a nest of layers, outside in:
 ```
 TURN ChannelData          — relay addressing; indistinguishable from WebRTC media
   └ DTLS 1.2 record       — AEAD ChaCha20-Poly1305, ECDHE-PSK (mutually authenticated)
-      └ KCP segment       — reliable ARQ (no crypto; DTLS already encrypts)
-          └ smux frame    — stream multiplexing
-              └ payload: "host:port" header + the proxied TCP stream
-                 (usually itself TLS/HTTPS, end-to-end to the real site)
+      └ WireGuard         — Noise / ChaCha20-Poly1305: a second cipher + routing
+          └ IP packets    — the app's TCP/UDP (web is itself TLS/HTTPS,
+                            end-to-end to the real site)
 ```
 
 **What DTLS gives us**
@@ -239,66 +251,77 @@ TURN ChannelData          — relay addressing; indistinguishable from WebRTC me
   the ISP and anyone on the path see only ciphertext.
 - **Disguise.** DTLS is exactly what WebRTC media is wrapped in, so the relay
   forwards it; raw bytes are silently dropped by the relay's data plane.
-- KCP deliberately uses **no** crypto (`NoneBlockCrypt`): DTLS already encrypts.
+- **WireGuard inside** adds its own key-based mutual authentication and a second
+  cipher (Noise + ChaCha20-Poly1305), and routes the IP packets to the exit. Raw
+  WireGuard would be dropped by the relay, so it rides inside DTLS, not instead of it.
 
-**Defense in depth.** The DTLS layer authenticates both ends, but the payload is
-*also* protected by the application layer: browsing is HTTPS, a second
-authenticated TLS session end-to-end to the real site — the VPS and relay only
-ever see that inner ciphertext, never your plaintext. Your traffic is encrypted
-twice over the untrusted relay.
+**Defense in depth.** Over the untrusted relay traffic is encrypted in layers:
+outer DTLS (ECDHE-PSK) + inner WireGuard (keys), and for the web also HTTPS — a
+third authenticated TLS session end-to-end to the real site that neither the relay
+nor even your own VPS can decrypt. Only your own VPS ever sees the destination.
 
-**The exit is not an open relay (SSRF guard).** The client dictates each stream's
-target, but the server rejects loopback, private, link-local and metadata addresses
+**The exit is not an open relay (SSRF guard).** The client dictates the target, but
+the exit rejects loopback, private, link-local and metadata addresses
 (`169.254.169.254`) and dials the already-verified IP — so the tunnel can't be
 pointed at the VPS's internal services or cloud metadata, and DNS rebinding can't
-slip in between the check and the dial. See `internal/tunnel`.
+slip in between the check and the dial. On by default. See `internal/wggw`.
 
 **What it still does *not* hide: the tunnel's existence.** Sustained high-volume
 traffic through a "call", and a TURN allocation egressing to an external IP, are
-detectable by traffic analysis. Footprint can be reduced — bitrate shaping
-(`-shape`) and exit rotation (a `-peer` list) are in place — but do not expect
-invisibility.
+detectable by traffic analysis. Footprint can be reduced (e.g. exit rotation via a
+`-peer` list) but do not expect invisibility.
 
 ## Components
 
-- `cmd/client` — local SOCKS5 proxy (CONNECT + UDP ASSOCIATE); a pool of tunnels,
-  each `smux → KCP → DTLS` over a `pion/turn` allocation, with a background manager
-  that refreshes credentials before they expire. A comma-separated `-peer` spreads
-  tunnels across several exits (rotation).
-- `cmd/server` — on the VPS: terminates DTLS, demuxes streams, filters the target
-  (SSRF guard) and dials it on the open internet (TCP and UDP), piping it back.
+- `cmd/client` — local SOCKS5 proxy (CONNECT + UDP ASSOCIATE); over the DTLS/TURN
+  carrier it runs WireGuard (`wgclient`) and dials through it. A background manager
+  re-establishes the tunnel before credentials expire; comma-separated `-peer` rotates exits.
+- `cmd/server` — on the VPS: terminates DTLS and runs a WireGuard exit (`wggw`) that
+  dials each target on the open internet (SSRF-guarded by default) and pipes it back.
 - `internal/okapi`, `internal/vkapi` — the VK/OK REST chain for `turn_server` creds.
-- `internal/mux` — KCP + smux over one DTLS connection, plus a `Lane` (tag-demux into
-  a reliable path for TCP and an unreliable datagram path for QUIC/UDP) and rate shaping.
-- `internal/tunnel` — stream/UDP-flow relay + an `SSRF guard` (blocks loopback/private/
-  link-local/metadata addresses, dials the verified IP).
+- `internal/wgbind` — a `conn.Bind` carrying WireGuard over a carrier `net.Conn` (DTLS/TURN).
+- `internal/wggw` — the server WireGuard exit (gVisor netstack, promiscuous + forwarders).
+- `internal/wgclient` — the client WireGuard endpoint on netstack + `DialContext` (remote DNS).
+- `internal/wgkey` — WireGuard (Curve25519) key generation/derivation, hex.
 - `internal/socks` — SOCKS5 CONNECT and UDP ASSOCIATE + per-stream target header.
 - `internal/authdtls` — mutual PSK DTLS authentication (ECDHE-PSK); supports a single
   `-secret` or a per-client keyring (identity→secret) with revocation.
-- `internal/vpntun`, `mobile/` — the tunnel as a `Dialer` + gomobile binding for Android.
+- `internal/mux`, `internal/tunnel` — **legacy** KCP/smux data plane; kept only for
+  the mobile `internal/vpntun` (Android is still on the old protocol).
 - `internal/captcha` — a user-supplied captcha fetcher that plugs into the
   client's `CredsFunc` seam. **Not part of the core.**
 
 ## Usage
 
-Pick a shared secret and set it on **both** ends (`-secret` / `TURNVPN_SECRET`);
-it mutually authenticates the tunnel so the exit is not an open proxy.
-
-On the VPS (open the UDP port in the firewall):
+Two layers of authentication: a **DTLS secret** (`-secret` / `TURNVPN_SECRET`) on
+both ends authenticates the carrier, and **WireGuard keys** authenticate the tunnel.
+First generate a keypair on each side:
 
 ```sh
-go build -o server ./cmd/server
-TURNVPN_SECRET='<shared secret>' ./server -listen 0.0.0.0:56000
+go build -o server ./cmd/server && go build -o client ./cmd/client
+./server -genkey   # → server private + public
+./client -genkey   # → client private + public
+```
+
+On the VPS: the server private key + a peers file (`<client public key> <its addr>`
+per line) + the DTLS secret (open the UDP port in the firewall):
+
+```sh
+echo '<client public key> 10.6.0.2/32' > peers.txt
+echo '<server private key>' > wg.key
+TURNVPN_SECRET='<shared secret>' ./server \
+  -listen 0.0.0.0:56000 -wg-key wg.key -wg-peers peers.txt
 ```
 
 On your machine (with a per-call token captured from a browser call):
 
 ```sh
-go build -o client ./cmd/client
-TURNVPN_SECRET='<same secret>' TURN_CALL_TOKEN='<call-token>' ./client \
+TURNVPN_SECRET='<same secret>' TURN_CALL_TOKEN='<call-token>' \
+TURNVPN_WG_KEY='<client private key>' TURNVPN_WG_SERVER_PUB='<server public key>' \
+./client \
   -peer <VPS_IP>:56000 \
   -vk-link <token from vk.ru/call/join/...> \
-  -tunnels 2
+  -wg-addr 10.6.0.2
 ```
 
 The client opens a local **SOCKS5 proxy at `127.0.0.1:1080`**. Point the browser
@@ -309,15 +332,15 @@ the client uses the credential provider wired in `main` (e.g. a captcha fetcher)
 — which you supply.
 
 QUIC/HTTP-3 and other UDP ride the tunnel alongside TCP (SOCKS5 UDP ASSOCIATE on
-the client, an unreliable datagram lane inside). DNS resolves on the VPS.
+the client). DNS resolves on the VPS (WireGuard carries all IP; names resolve at
+the exit).
 
 **Optional flags:**
 
-- `-peer a:56000,b:56000` — multiple exits; tunnels are spread across them (rotation).
-- `-shape 2mbit` (both ends) — shape the outbound bitrate toward a call-like envelope.
-- Per-client access instead of one shared secret: `-keyring file` on the server
-  (`identity secret` lines) and `-identity <id>` on the client; revoke a client by
-  deleting its line and restarting the server.
+- `-peer a:56000,b:56000` — multiple exits; the tunnel rotates across them on reconnect.
+- Multiple clients: add a line per client to `-wg-peers` (each with its own
+  `-wg-addr`). You can also layer per-client DTLS access: `-keyring file` on the
+  server (`identity secret` lines) and `-identity <id>` on the client.
 
 ## Android
 
@@ -327,9 +350,10 @@ gomobile `.aar`: tun2socks reads the tun → our tunnel) lives in
 
 ## Status
 
-Vector 1 (TURN relay + DTLS + SOCKS5) is **working end-to-end**: real HTTPS
+Vector 1 (TURN relay + DTLS + **WireGuard**) is **working end-to-end**: real HTTPS
 browsing and QUIC/HTTP-3 exit via the VPS over whitelisted VK infrastructure, with
-a tunnel pool and proactive credential refresh. Hardening is in place: mutual
-authentication (a single secret or a per-client keyring), an SSRF guard on the exit,
-a non-root systemd service on the VPS, the secret in the Android Keystore, bitrate
-shaping and exit rotation. See `PLAN.md` and `LAB.md` for the full history.
+proactive credential refresh. The data plane moved from KCP/smux/SOCKS to WireGuard
+(desktop done and verified locally; Android still on the old protocol). Hardening is
+in place: mutual DTLS authentication (a single secret or a per-client keyring), an
+SSRF guard on the exit (on by default), a non-root systemd service on the VPS, and
+the secret in the Android Keystore. See `PLAN.md` and `LAB.md` for the full history.
