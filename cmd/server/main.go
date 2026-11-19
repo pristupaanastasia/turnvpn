@@ -14,6 +14,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/pion/dtls/v3"
 
 	"github.com/pristupaanastasia/turnvpn/internal/authdtls"
+	"github.com/pristupaanastasia/turnvpn/internal/kernelexit"
 	"github.com/pristupaanastasia/turnvpn/internal/wgbind"
 	"github.com/pristupaanastasia/turnvpn/internal/wggw"
 	"github.com/pristupaanastasia/turnvpn/internal/wgkey"
@@ -38,6 +40,8 @@ func main() {
 	mtu := flag.Int("mtu", 1280, "inner tunnel MTU (leave room for WireGuard + DTLS inside a TURN datagram)")
 	idle := flag.Duration("idle", 150*time.Second, "drop a tunnel after this long with no packets from the client")
 	shape := flag.String("shape", "", "footprint-shape outbound bitrate cap, e.g. 2mbit (empty = unlimited)")
+	exitMode := flag.String("exit", "userspace", "exit data plane: 'userspace' (gVisor netstack, non-root, SSRF-safe) or 'kernel' (relay to a kernel wg0; needs scripts/kernel-exit-setup.sh)")
+	wgPort := flag.Int("wg-port", 51820, "with -exit kernel: the kernel WireGuard listen port on localhost to relay into")
 	genKey := flag.Bool("genkey", false, "print a fresh WireGuard keypair and exit")
 	flag.Parse()
 
@@ -72,20 +76,41 @@ func main() {
 		log.Fatal("server: provide -secret/TURNVPN_SECRET or -keyring/TURNVPN_KEYRING — DTLS auth keeps the exit from being an open proxy")
 	}
 
-	// --- WireGuard server key + authorized peers ---
-	wgPriv, err := loadWGKey(*wgKeyPath)
-	if err != nil {
-		log.Fatalf("server: wg key: %v", err)
+	switch *exitMode {
+	case "userspace", "kernel":
+	default:
+		log.Fatalf("server: -exit must be 'userspace' or 'kernel', got %q", *exitMode)
 	}
+
 	shapeBytes, err := wgbind.ParseBitrate(*shape)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
-	peers, err := loadWGPeers(*wgPeersPath)
-	if err != nil {
-		log.Fatalf("server: wg peers: %v", err)
+
+	// --- WireGuard server key + authorized peers ---
+	// In kernel mode the key, peers, routing and NAT all live in the kernel wg0
+	// interface (set up by scripts/kernel-exit-setup.sh); the Go server only
+	// relays datagrams, so it needs no WireGuard key or peer list of its own.
+	var (
+		wgPriv string
+		peers  []wggw.Peer
+	)
+	if *exitMode == "userspace" {
+		wgPriv, err = loadWGKey(*wgKeyPath)
+		if err != nil {
+			log.Fatalf("server: wg key: %v", err)
+		}
+		peers, err = loadWGPeers(*wgPeersPath)
+		if err != nil {
+			log.Fatalf("server: wg peers: %v", err)
+		}
+		log.Printf("server: userspace WireGuard exit ready (%d peer(s), mtu %d)", len(peers), *mtu)
+	} else {
+		if *shape != "" {
+			log.Fatal("server: -shape is a userspace-exit feature; shape the kernel exit with tc instead")
+		}
+		log.Printf("server: kernel WireGuard exit — relaying into 127.0.0.1:%d (ensure wg0 + nft egress filter are up)", *wgPort)
 	}
-	log.Printf("server: WireGuard exit ready (%d peer(s), mtu %d)", len(peers), *mtu)
 
 	laddr, err := net.ResolveUDPAddr("udp", *listen)
 	if err != nil {
@@ -110,13 +135,33 @@ func main() {
 			log.Printf("server: accept: %v", err)
 			continue
 		}
-		go serve(conn, wgPriv, peers, *mtu, *idle, shapeBytes)
+		go serve(conn, exitCfg{
+			mode:   *exitMode,
+			wgPriv: wgPriv,
+			peers:  peers,
+			mtu:    *mtu,
+			idle:   *idle,
+			shape:  shapeBytes,
+			wgPort: *wgPort,
+		})
 	}
 }
 
-// serve completes the DTLS handshake and runs a WireGuard exit over the connection
-// until the client goes idle (no packets for idle), then tears it down.
-func serve(conn net.Conn, wgPriv string, peers []wggw.Peer, mtu int, idle time.Duration, shape int) {
+// exitCfg bundles everything serve needs to stand up the chosen exit for one
+// tunnel.
+type exitCfg struct {
+	mode   string
+	wgPriv string
+	peers  []wggw.Peer
+	mtu    int
+	idle   time.Duration
+	shape  int
+	wgPort int
+}
+
+// serve completes the DTLS handshake and runs the chosen WireGuard exit over the
+// connection until the client goes idle (no packets for idle), then tears it down.
+func serve(conn net.Conn, cfg exitCfg) {
 	defer func() { _ = conn.Close() }()
 	ra := conn.RemoteAddr()
 
@@ -129,33 +174,52 @@ func serve(conn net.Conn, wgPriv string, peers []wggw.Peer, mtu int, idle time.D
 			return
 		}
 	}
-	log.Printf("server: tunnel up from %s", ra)
+	log.Printf("server: tunnel up from %s (exit=%s)", ra, cfg.mode)
 
 	// Wrap the carrier so we can detect an idle (dead) client: WireGuard keepalives
 	// keep a live client's reads flowing; silence past idle means it is gone.
 	ac := &activityConn{Conn: conn}
 	ac.touch()
 
-	gw, err := wggw.New(ac, wggw.Config{
-		ServerPrivKey: wgPriv,
-		Peers:         peers,
-		MTU:           mtu,
-		Shape:         shape,
-		Logf:          log.Printf,
-	})
+	closer, err := startExit(ac, ra, cfg)
 	if err != nil {
-		log.Printf("server: %s gateway: %v", ra, err)
+		log.Printf("server: %s exit: %v", ra, err)
 		return
 	}
-	defer func() { _ = gw.Close() }()
+	defer func() { _ = closer.Close() }()
 
 	for {
-		time.Sleep(idle / 3)
-		if since := time.Since(ac.lastRead()); since > idle {
+		time.Sleep(cfg.idle / 3)
+		if since := time.Since(ac.lastRead()); since > cfg.idle {
 			log.Printf("server: tunnel from %s idle for %s, closing", ra, since.Round(time.Second))
 			return
 		}
 	}
+}
+
+// startExit stands up the configured exit data plane over the (activity-tracked)
+// carrier and returns a Closer that tears it down. Both exits read the carrier via
+// ac, so the idle watchdog sees client activity either way.
+func startExit(ac net.Conn, ra net.Addr, cfg exitCfg) (io.Closer, error) {
+	if cfg.mode == "kernel" {
+		r, err := kernelexit.New(ac, cfg.wgPort)
+		if err != nil {
+			return nil, err
+		}
+		r.Start()
+		return r, nil
+	}
+	gw, err := wggw.New(ac, wggw.Config{
+		ServerPrivKey: cfg.wgPriv,
+		Peers:         cfg.peers,
+		MTU:           cfg.mtu,
+		Shape:         cfg.shape,
+		Logf:          log.Printf,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return gw, nil
 }
 
 // activityConn records the time of the last successful read so an idle tunnel can
