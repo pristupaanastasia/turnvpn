@@ -100,7 +100,8 @@ egress'ом на внешний IP палятся трафик-анализом.
   набирает цель в открытом интернете (SSRF-guard по умолчанию) и качает обратно.
 - `internal/okapi`, `internal/vkapi` — REST-цепочка VK/OK, дающая креды `turn_server`.
 - `internal/wgbind` — `conn.Bind`: WireGuard поверх carrier-`net.Conn` (DTLS/TURN).
-- `internal/wggw` — серверный WG-выход: gvisor-netstack (promiscuous) + TCP/UDP-форвардеры.
+- `internal/wggw` — серверный WG-выход (по умолчанию): gvisor-netstack (promiscuous) + TCP/UDP-форвардеры.
+- `internal/kernelexit` — альтернативный выход `-exit kernel`: релей в ядро (`wg0` + nft MASQUERADE). Масштабируемее, но нужен root; см. `docs/kernel-exit.md`.
 - `internal/wgclient` — клиентский WG на netstack + `DialContext` (resolve через туннель).
 - `internal/wgkey` — генерация/деривация WG-ключей (Curve25519, hex).
 - `internal/socks` — SOCKS5 CONNECT и UDP ASSOCIATE + per-stream target-заголовок.
@@ -283,7 +284,8 @@ detectable by traffic analysis. Footprint can be reduced (bitrate shaping via
   dials each target on the open internet (SSRF-guarded by default) and pipes it back.
 - `internal/okapi`, `internal/vkapi` — the VK/OK REST chain for `turn_server` creds.
 - `internal/wgbind` — a `conn.Bind` carrying WireGuard over a carrier `net.Conn` (DTLS/TURN).
-- `internal/wggw` — the server WireGuard exit (gVisor netstack, promiscuous + forwarders).
+- `internal/wggw` — the server WireGuard exit, default (gVisor netstack, promiscuous + forwarders).
+- `internal/kernelexit` — the alternative `-exit kernel` data plane: relay into a kernel `wg0` (+ nft MASQUERADE). Scales further but needs root; see `docs/kernel-exit.md`.
 - `internal/wgclient` — the client WireGuard endpoint on netstack + `DialContext` (remote DNS).
 - `internal/wgkey` — WireGuard (Curve25519) key generation/derivation, hex.
 - `internal/socks` — SOCKS5 CONNECT and UDP ASSOCIATE + per-stream target header.
