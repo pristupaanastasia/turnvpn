@@ -8,9 +8,12 @@ import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.net.VpnService
 import android.os.Bundle
+import android.util.Log
 import android.view.animation.LinearInterpolator
 import android.widget.EditText
+import android.widget.TextView
 import android.widget.Toast
+import com.turnvpn.turnvpn.Turnvpn
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -24,6 +27,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var secret: EditText
     private lateinit var link: EditText
     private lateinit var token: EditText
+    private lateinit var serverPub: EditText
+    private lateinit var devicePubkey: TextView
 
     private lateinit var connectBtn: MaterialButton
     private lateinit var disconnectBtn: MaterialButton
@@ -54,8 +59,11 @@ class MainActivity : AppCompatActivity() {
         secret = findViewById(R.id.secret)
         link = findViewById(R.id.link)
         token = findViewById(R.id.token)
+        serverPub = findViewById(R.id.server_pub)
+        devicePubkey = findViewById(R.id.device_pubkey)
         connectBtn = findViewById(R.id.connect)
         disconnectBtn = findViewById(R.id.disconnect)
+        ensureWgKeypair()
         loadPrefs()
 
         findViewById<MaterialButton>(R.id.getToken).setOnClickListener {
@@ -155,6 +163,9 @@ class MainActivity : AppCompatActivity() {
             .putExtra(TurnvpnService.EXTRA_SECRET, secret.text.toString().trim())
             .putExtra(TurnvpnService.EXTRA_LINK, link.text.toString().trim())
             .putExtra(TurnvpnService.EXTRA_TOKEN, token.text.toString().trim())
+            .putExtra(TurnvpnService.EXTRA_WGKEY, prefs().getString("wgkey", ""))
+            .putExtra(TurnvpnService.EXTRA_WGSERVERPUB, serverPub.text.toString().trim())
+            .putExtra(TurnvpnService.EXTRA_WGADDR, TurnvpnService.DEFAULT_WGADDR)
         startService(intent)
     }
 
@@ -181,6 +192,8 @@ class MainActivity : AppCompatActivity() {
         secret.setText(p.getString("secret", ""))
         link.setText(p.getString("link", ""))
         token.setText(p.getString("token", ""))
+        serverPub.setText(p.getString("server_pub", ""))
+        devicePubkey.text = "ключ этого устройства (в peers сервера):\n" + p.getString("wgpub", "")
     }
 
     private fun savePrefs() {
@@ -189,6 +202,24 @@ class MainActivity : AppCompatActivity() {
             .putString("secret", secret.text.toString().trim())
             .putString("link", link.text.toString().trim())
             .putString("token", token.text.toString().trim())
+            .putString("server_pub", serverPub.text.toString().trim())
             .apply()
+    }
+
+    // ensureWgKeypair generates this device's WireGuard keypair once and stores the
+    // private half in the Keystore-backed prefs. The public half is shown so the
+    // operator can add it to the server's peers file.
+    private fun ensureWgKeypair() {
+        val p = prefs()
+        if (!p.getString("wgkey", "").isNullOrBlank()) return
+        try {
+            val pair = Turnvpn.generateWGKeypair() // "privateHex publicHex"
+            val parts = pair.trim().split(" ")
+            if (parts.size == 2) {
+                p.edit().putString("wgkey", parts[0]).putString("wgpub", parts[1]).apply()
+            }
+        } catch (e: Exception) {
+            Log.e("turnvpn", "wg keypair generation failed: ${e.message}", e)
+        }
     }
 }

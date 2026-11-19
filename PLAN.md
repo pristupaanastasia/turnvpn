@@ -111,8 +111,11 @@ DTLS-over-TURN carrier — сырой WG реле дропнет). Всё в use
       ключи — `-genkey`/`-wg-key`/`-wg-peers`/`-wg-server-pub`.
 - [x] Доказано локально: `TestClientDialThroughGateway`, `TestGatewayOverRealDTLS`
       (поверх настоящего pion/dtls), `-race` чисто.
-- [ ] Редеплой VPS (заменит mux-сервер) + проверка через реальный TURN-реле.
-- [ ] Удалить мёртвые `internal/mux`/`internal/tunnel` после миграции Android.
+- [x] Редеплой VPS (WG-выход живой, слушает :56000) — живой прогон через реальный
+      TURN ждёт call-token.
+- [x] Миграция Android-ядра на WG (`mobile.Start` на VpnService-tun) + удаление
+      мёртвого `internal/{mux,tunnel,vpntun}`; `internal/carrier` выделен общим.
+      Осталось: собрать `.aar`/APK и обкатать на эмуляторе.
 
 ### Stage 5 — устойчивость  ✅ **ПРОЙДЕН**
 - [x] Пул параллельных туннелей для throughput (`-tunnels N`, round-robin).
@@ -205,10 +208,9 @@ DTLS-over-TURN carrier — сырой WG реле дропнет). Всё в use
 - `internal/wgkey` — генерация/деривация WG-ключей (Curve25519, hex).
 - `internal/socks` — SOCKS5 CONNECT + UDP ASSOCIATE, per-stream target-заголовок.
 - `internal/authdtls` — взаимная PSK-аутентификация DTLS (ECDHE-PSK) + keyring.
-- `internal/mux`, `internal/tunnel` — **legacy** KCP/smux/lane data plane; остались
-  только под mobile (`internal/vpntun`), удалятся после миграции Android на WG.
-- `internal/vpntun`, `mobile/`, `android/` — старый `Dialer` + gomobile `.aar` +
-  Kotlin **HolubVPN** (ещё на старом протоколе).
+- `internal/carrier` — несущий слой (креды→TURN→PSK-DTLS), общий для десктопа/Android.
+- `mobile/`, `android/` — gomobile `.aar` (WireGuard на VpnService-tun) + Kotlin
+  **HolubVPN**.
 - `internal/graceful`, `internal/dotenv` — инфра (signal ctx, .env).
 - `internal/captcha` — решатель капчи (**WIP пользователя**, не часть моего кода;
   подключается как `CaptchaSolver` через интерфейс).

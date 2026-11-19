@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-11-19 — WireGuard: Android-ядро мигрировано, legacy mux/tunnel/vpntun удалены ✅ (Go)
+
+**Stage:** Stage 10 (Android) · **Verdict:** ✅ Go-часть готова, собирается под
+`android/arm64`; Kotlin обновлён, но на эмуляторе ещё не прогнан
+
+- **Tried:** довести разворот до Android. `mobile.Start` теперь гоняет `wireguard-go`
+  прямо на tun-фд VpnService (`tun.CreateUnmonitoredTUNFromFD`, Linux-тег; stub для
+  dev-хостов, чтобы `go test ./...` собирался на darwin) поверх `wgbind`+carrier.
+  Выделен `internal/carrier` (креды→TURN→PSK-DTLS) — общий для десктопа и Android.
+  Убраны `tun2socks`, DNS-over-TCP-shim, `mobile/dns.go|udp.go`.
+- **Cleanup:** `mobile` больше не зависит от `internal/vpntun` → весь legacy-кластер
+  `{vpntun, tunnel, mux}` осиротел и **удалён**; `go mod tidy` выкинул `kcp-go`/`smux`.
+- **Kotlin:** `TurnvpnService`/`MainActivity` — новые extra (wgKey/wgServerPub/wgAddr),
+  генерация пары ключей на устройстве (приватный → Keystore, публичный показывается
+  для peers сервера), tun на `10.6.0.2/32`, MTU 1280.
+- **Result:** `go build ./...` + `GOOS=android GOARCH=arm64 go build ./mobile` ок;
+  `go test ./...` зелёный, гейт 72.3%. `internal/carrier` покрыт интеграционно
+  (локальный pion/turn + DTLS-пир).
+- **Next:** собрать `.aar` (`scripts/build.sh aar`) + APK, прогнать на эмуляторе
+  против живого WG-выхода; проверить HTTPS/QUIC. Kotlin вживую ещё не компилировался
+  (нет Android SDK/gomobile в этой среде).
+
 ## 2026-11-19 — WireGuard: десктоп end-to-end (сервер+клиент) заменил KCP/smux/SOCKS ✅ (локально)
 
 **Stage:** Stage 4/8 (WireGuard, десктоп) · **Verdict:** ✅ полный путь клиент↔сервер
