@@ -14,109 +14,47 @@
         android:paddingTop="40dp"
         android:paddingBottom="32dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="HolubVPN"
-            android:textColor="@color/onDark"
-            android:textSize="30sp"
-            android:textStyle="bold"
-            android:letterSpacing="-0.02" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:layout_marginBottom="28dp"
-            android:text="тоннель через TURN VK из белого списка"
-            android:textColor="@color/muted"
-            android:textSize="14sp" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+        <!-- Header: title + gear that opens Settings -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="14dp"
-            android:hint="VPS host:port"
-            app:boxCornerRadiusTopStart="14dp"
-            app:boxCornerRadiusTopEnd="14dp"
-            app:boxCornerRadiusBottomStart="14dp"
-            app:boxCornerRadiusBottomEnd="14dp">
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="28dp">
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/peer"
-                android:layout_width="match_parent"
+            <LinearLayout
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:inputType="text"
-                android:maxLines="1" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:layout_weight="1"
+                android:orientation="vertical">
 
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="14dp"
-            android:hint="shared secret"
-            app:boxCornerRadiusTopStart="14dp"
-            app:boxCornerRadiusTopEnd="14dp"
-            app:boxCornerRadiusBottomStart="14dp"
-            app:boxCornerRadiusBottomEnd="14dp"
-            app:endIconMode="password_toggle">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="HolubVPN"
+                    android:textColor="@color/onDark"
+                    android:textSize="30sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="-0.02" />
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/secret"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="textPassword"
-                android:maxLines="1" />
-        </com.google.android.material.textfield.TextInputLayout>
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="тоннель через TURN VK из белого списка"
+                    android:textColor="@color/muted"
+                    android:textSize="14sp" />
+            </LinearLayout>
 
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="4dp"
-            android:hint="server WireGuard public key"
-            app:boxCornerRadiusTopStart="14dp"
-            app:boxCornerRadiusTopEnd="14dp"
-            app:boxCornerRadiusBottomStart="14dp"
-            app:boxCornerRadiusBottomEnd="14dp">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/server_pub"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:maxLines="1" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <TextView
-            android:id="@+id/device_pubkey"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="14dp"
-            android:textIsSelectable="true"
-            android:textSize="12sp"
-            android:text="" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="14dp"
-            android:hint="DTLS identity (optional, keyring mode)"
-            app:boxCornerRadiusTopStart="14dp"
-            app:boxCornerRadiusTopEnd="14dp"
-            app:boxCornerRadiusBottomStart="14dp"
-            app:boxCornerRadiusBottomEnd="14dp">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/identity"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text"
-                android:maxLines="1" />
-        </com.google.android.material.textfield.TextInputLayout>
+            <ImageButton
+                android:id="@+id/settings"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:src="@drawable/ic_settings"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:tint="@color/muted"
+                android:contentDescription="Настройки" />
+        </LinearLayout>
 
         <com.google.android.material.textfield.TextInputLayout
             style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
@@ -188,7 +126,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:lineSpacingExtra="2dp"
-            android:text="TCP-тоннель. DNS идёт через туннель автоматически; QUIC (UDP) падает на TCP. Держи браузерный звонок живым."
+            android:text="Весь трафик устройства идёт через туннель (WireGuard). VPS и ключи — в настройках (⚙). Держи браузерный звонок живым."
             android:textColor="@color/muted"
             android:textSize="12sp" />
     </LinearLayout>
