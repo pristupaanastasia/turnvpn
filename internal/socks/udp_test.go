@@ -43,3 +43,17 @@ func TestDecodeUDPErrors(t *testing.T) {
 		t.Error("bad ATYP accepted")
 	}
 }
+
+func TestUDPEncodeDecodeDomain(t *testing.T) {
+	packet, err := socks.EncodeUDP("example.com:53", []byte("query"))
+	if err != nil {
+		t.Fatalf("EncodeUDP: %v", err)
+	}
+	target, payload, err := socks.DecodeUDP(packet)
+	if err != nil {
+		t.Fatalf("DecodeUDP: %v", err)
+	}
+	if target != "example.com:53" || string(payload) != "query" {
+		t.Fatalf("round trip = %q / %q", target, payload)
+	}
+}
