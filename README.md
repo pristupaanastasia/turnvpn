@@ -88,8 +88,8 @@ HTTPS — третья, аутентифицированная TLS-сессия 
 **Чего это всё равно НЕ скрывает: сам факт туннеля.** Payload зашифрован и
 аутентифицирован, но устойчиво тяжёлый трафик через «звонок» и TURN-аллокация с
 egress'ом на внешний IP палятся трафик-анализом. Шифрование защищает *что* передаётся,
-а не *факт* работы туннеля. Footprint можно снижать (напр. ротация выходов `-peer`
-списком), но на невидимость рассчитывать не стоит.
+а не *факт* работы туннеля. Footprint можно снижать — шейп битрейта (`-shape`) и
+ротация выходов (`-peer` списком) — но на невидимость рассчитывать не стоит.
 
 ## Компоненты
 
@@ -163,6 +163,7 @@ QUIC/HTTP-3 и прочий UDP идут через туннель наравн�
 **Опциональные флаги:**
 
 - `-peer a:56000,b:56000` — несколько выходов; туннель ротируется по ним при переподключении.
+- `-shape 2mbit` (обе стороны) — шейп исходящего битрейта под «конверт» звонка.
 - Несколько клиентов: добавь по строке на каждого в `-wg-peers` (у каждого свой
   `-wg-addr`). Дополнительно можно включить per-client DTLS-доступ: на сервере
   `-keyring file` (строки `identity secret`), у клиента `-identity <id>`.
@@ -270,8 +271,8 @@ slip in between the check and the dial. On by default. See `internal/wggw`.
 
 **What it still does *not* hide: the tunnel's existence.** Sustained high-volume
 traffic through a "call", and a TURN allocation egressing to an external IP, are
-detectable by traffic analysis. Footprint can be reduced (e.g. exit rotation via a
-`-peer` list) but do not expect invisibility.
+detectable by traffic analysis. Footprint can be reduced (bitrate shaping via
+`-shape`, exit rotation via a `-peer` list) but do not expect invisibility.
 
 ## Components
 
@@ -340,6 +341,7 @@ the exit).
 **Optional flags:**
 
 - `-peer a:56000,b:56000` — multiple exits; the tunnel rotates across them on reconnect.
+- `-shape 2mbit` (both ends) — shape the outbound bitrate toward a call-like envelope.
 - Multiple clients: add a line per client to `-wg-peers` (each with its own
   `-wg-addr`). You can also layer per-client DTLS access: `-keyring file` on the
   server (`identity secret` lines) and `-identity <id>` on the client.

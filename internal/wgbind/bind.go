@@ -30,13 +30,24 @@ import (
 // datagram boundaries (one Write == one WireGuard packet == one Read) and support
 // SetReadDeadline — a pion/dtls conn over TURN ChannelData does both.
 type Bind struct {
-	mu   sync.Mutex
-	c    net.Conn
-	open bool
+	mu     sync.Mutex
+	c      net.Conn
+	open   bool
+	shaper *shaper // nil = no footprint shaping
 }
 
 // New wraps an already-connected, datagram-preserving carrier conn.
 func New(c net.Conn) *Bind { return &Bind{c: c} }
+
+// NewWithRate is New plus footprint shaping: outbound WireGuard packets are paced to
+// at most bytesPerSec. bytesPerSec <= 0 disables shaping (same as New).
+func NewWithRate(c net.Conn, bytesPerSec int) *Bind {
+	b := &Bind{c: c}
+	if bytesPerSec > 0 {
+		b.shaper = newShaper(bytesPerSec)
+	}
+	return b
+}
 
 // carrierEndpoint is the single fixed peer reachable over the carrier. WireGuard
 // caches a src/dst per peer; here both are the one tunnel, so the endpoint is a
@@ -81,6 +92,9 @@ func (b *Bind) receive(packets [][]byte, sizes []int, eps []conn.Endpoint) (int,
 // ignored: there is only one carrier, hence one destination.
 func (b *Bind) Send(bufs [][]byte, _ conn.Endpoint) error {
 	for _, buf := range bufs {
+		if b.shaper != nil {
+			b.shaper.take(len(buf))
+		}
 		if _, err := b.c.Write(buf); err != nil {
 			return err
 		}

@@ -24,6 +24,7 @@ import (
 	"github.com/pion/dtls/v3"
 
 	"github.com/pristupaanastasia/turnvpn/internal/authdtls"
+	"github.com/pristupaanastasia/turnvpn/internal/wgbind"
 	"github.com/pristupaanastasia/turnvpn/internal/wggw"
 	"github.com/pristupaanastasia/turnvpn/internal/wgkey"
 )
@@ -36,6 +37,7 @@ func main() {
 	wgPeersPath := flag.String("wg-peers", "", "path to the WireGuard peers file ('pubkey allowed-ip' per line; or env TURNVPN_WG_PEERS)")
 	mtu := flag.Int("mtu", 1280, "inner tunnel MTU (leave room for WireGuard + DTLS inside a TURN datagram)")
 	idle := flag.Duration("idle", 150*time.Second, "drop a tunnel after this long with no packets from the client")
+	shape := flag.String("shape", "", "footprint-shape outbound bitrate cap, e.g. 2mbit (empty = unlimited)")
 	genKey := flag.Bool("genkey", false, "print a fresh WireGuard keypair and exit")
 	flag.Parse()
 
@@ -75,6 +77,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("server: wg key: %v", err)
 	}
+	shapeBytes, err := wgbind.ParseBitrate(*shape)
+	if err != nil {
+		log.Fatalf("server: %v", err)
+	}
 	peers, err := loadWGPeers(*wgPeersPath)
 	if err != nil {
 		log.Fatalf("server: wg peers: %v", err)
@@ -104,13 +110,13 @@ func main() {
 			log.Printf("server: accept: %v", err)
 			continue
 		}
-		go serve(conn, wgPriv, peers, *mtu, *idle)
+		go serve(conn, wgPriv, peers, *mtu, *idle, shapeBytes)
 	}
 }
 
 // serve completes the DTLS handshake and runs a WireGuard exit over the connection
 // until the client goes idle (no packets for idle), then tears it down.
-func serve(conn net.Conn, wgPriv string, peers []wggw.Peer, mtu int, idle time.Duration) {
+func serve(conn net.Conn, wgPriv string, peers []wggw.Peer, mtu int, idle time.Duration, shape int) {
 	defer func() { _ = conn.Close() }()
 	ra := conn.RemoteAddr()
 
@@ -134,6 +140,7 @@ func serve(conn net.Conn, wgPriv string, peers []wggw.Peer, mtu int, idle time.D
 		ServerPrivKey: wgPriv,
 		Peers:         peers,
 		MTU:           mtu,
+		Shape:         shape,
 		Logf:          log.Printf,
 	})
 	if err != nil {

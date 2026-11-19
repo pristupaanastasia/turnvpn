@@ -37,6 +37,7 @@ import (
 	"github.com/pristupaanastasia/turnvpn/internal/captcha"
 	"github.com/pristupaanastasia/turnvpn/internal/okapi"
 	"github.com/pristupaanastasia/turnvpn/internal/socks"
+	"github.com/pristupaanastasia/turnvpn/internal/wgbind"
 	"github.com/pristupaanastasia/turnvpn/internal/wgclient"
 	"github.com/pristupaanastasia/turnvpn/internal/wgkey"
 )
@@ -44,7 +45,7 @@ import (
 type config struct {
 	listen, vkLink, token, appKey, secret, identity string
 	wgPriv, wgServerPub, wgAddr                     string
-	mtu                                             int
+	mtu, shape                                      int
 }
 
 // CredsFunc resolves the call's TURN credentials for a (re)connect: given the join
@@ -83,6 +84,7 @@ func main() {
 	wgAddr := flag.String("wg-addr", "10.6.0.2", "this client's WireGuard tunnel address")
 	mtu := flag.Int("mtu", 1280, "inner tunnel MTU")
 	refresh := flag.Duration("refresh", tunnelTTL, "re-establish the tunnel after this interval (before its ~10m creds expire)")
+	shapeStr := flag.String("shape", "", "footprint-shape outbound bitrate cap, e.g. 2mbit (empty = unlimited)")
 	genKey := flag.Bool("genkey", false, "print a fresh WireGuard keypair and exit")
 	flag.Parse()
 
@@ -116,6 +118,10 @@ func main() {
 	if *wgKeyHex == "" || *wgServerPub == "" {
 		log.Fatal("client: -wg-key and -wg-server-pub are required (use -genkey to make a client keypair; add its public key to the server peers file)")
 	}
+	shapeBytes, err := wgbind.ParseBitrate(*shapeStr)
+	if err != nil {
+		log.Fatalf("client: %v", err)
+	}
 	if _, err := wgkey.Public(*wgKeyHex); err != nil {
 		log.Fatalf("client: -wg-key: %v", err)
 	}
@@ -123,7 +129,7 @@ func main() {
 	cfg := config{
 		listen: *listen, vkLink: *vkLink, token: *token, appKey: *appKey,
 		secret: *secret, identity: *identity,
-		wgPriv: *wgKeyHex, wgServerPub: *wgServerPub, wgAddr: *wgAddr, mtu: *mtu,
+		wgPriv: *wgKeyHex, wgServerPub: *wgServerPub, wgAddr: *wgAddr, mtu: *mtu, shape: shapeBytes,
 	}
 
 	var peerAddrs []*net.UDPAddr
@@ -341,6 +347,7 @@ func (t *tunnel) establish(ctx context.Context) (*clientRef, error) {
 		ServerPub: cfg.wgServerPub,
 		Address:   cfg.wgAddr,
 		MTU:       cfg.mtu,
+		Shape:     cfg.shape,
 		Logf:      log.Printf,
 	})
 	if err != nil {

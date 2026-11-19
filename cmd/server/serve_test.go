@@ -24,7 +24,7 @@ func TestServeIntegration(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		// Short idle so the watchdog fires soon after the client goes quiet.
-		serve(a, serverPriv, []wggw.Peer{{PubKey: clientPub, AllowedIP: clientIP + "/32"}}, 1420, 600*time.Millisecond)
+		serve(a, serverPriv, []wggw.Peer{{PubKey: clientPub, AllowedIP: clientIP + "/32"}}, 1420, 600*time.Millisecond, 0)
 		close(done)
 	}()
 

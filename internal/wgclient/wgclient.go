@@ -43,6 +43,10 @@ type Config struct {
 	// the carrier/relay mapping and the server's idle watchdog alive. Default 25.
 	Keepalive int
 
+	// Shape paces outbound WireGuard emission to at most this many bytes/sec
+	// (footprint shaping). 0 = unlimited.
+	Shape int
+
 	// Logf logs device-level errors; default no-op.
 	Logf func(string, ...any)
 }
@@ -77,7 +81,7 @@ func New(carrier net.Conn, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wgclient: tun: %w", err)
 	}
-	dev := device.NewDevice(tunDev, wgbind.New(carrier), device.NewLogger(device.LogLevelError, "wgclient "))
+	dev := device.NewDevice(tunDev, wgbind.NewWithRate(carrier, cfg.Shape), device.NewLogger(device.LogLevelError, "wgclient "))
 	uapi := fmt.Sprintf(""+
 		"private_key=%s\n"+
 		"listen_port=0\n"+
