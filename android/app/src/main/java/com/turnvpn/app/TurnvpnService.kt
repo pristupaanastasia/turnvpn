@@ -88,6 +88,8 @@ class TurnvpnService : VpnService() {
                 }
             }
             stopVpn()
+            // Surface the reason so the UI doesn't just fail silently.
+            VpnState.fail(e.message ?: "не удалось подключиться")
         }
     }
 

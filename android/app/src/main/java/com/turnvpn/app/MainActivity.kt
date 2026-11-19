@@ -94,12 +94,14 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         VpnState.listener = { render(it) }
+        VpnState.errorListener = { msg -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
         render(VpnState.state)
     }
 
     override fun onPause() {
         super.onPause()
         VpnState.listener = null
+        VpnState.errorListener = null
     }
 
     // render reflects the connection status in the Connect button: a calm violet

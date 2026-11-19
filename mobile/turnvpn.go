@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -128,6 +129,7 @@ func Stop() {
 // Hello is a trivial sanity call usable from Kotlin to verify the binding.
 func Hello() string { return "turnvpn gomobile ok" }
 
-// GoLog is a no-op by default; Kotlin may override logging by other means. It
-// matches the carrier Logf shape.
-func GoLog(string, ...any) {}
+// GoLog writes through the standard logger so carrier/transport progress is visible
+// in logcat (gomobile routes Go log output there), which makes connect failures
+// diagnosable from the device. It matches the carrier Logf shape.
+func GoLog(format string, args ...any) { log.Printf("turnvpn: "+format, args...) }
