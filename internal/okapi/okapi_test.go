@@ -132,3 +132,9 @@ func TestDescriptorParse(t *testing.T) {
 		t.Errorf("stun server parse: %+v", d.StunServer)
 	}
 }
+
+func TestBuildFormStringifyError(t *testing.T) {
+	if _, err := BuildForm("m", "app", "", Params{"bad": make(chan int)}); err == nil {
+		t.Error("an unmarshalable param should make BuildForm error")
+	}
+}
