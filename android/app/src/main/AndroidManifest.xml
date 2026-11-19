@@ -24,6 +24,11 @@
         </activity>
 
         <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="Настройки" />
+
+        <activity
             android:name=".CaptchaActivity"
             android:exported="false"
             android:label="Solve captcha / join call" />

@@ -4,33 +4,25 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.net.VpnService
 import android.os.Bundle
-import android.util.Log
 import android.view.animation.LinearInterpolator
 import android.widget.EditText
-import android.widget.TextView
+import android.widget.ImageButton
 import android.widget.Toast
-import com.turnvpn.turnvpn.Turnvpn
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 import com.google.android.material.button.MaterialButton
 
+// MainActivity is the per-session screen: set/refresh the VK call link + token and
+// connect. Everything you set once (VPS endpoint, shared secret, server WireGuard
+// key, DTLS identity, this device's key) lives in SettingsActivity (gear icon).
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var peer: EditText
-    private lateinit var secret: EditText
     private lateinit var link: EditText
     private lateinit var token: EditText
-    private lateinit var serverPub: EditText
-    private lateinit var identity: EditText
-    private lateinit var devicePubkey: TextView
-
     private lateinit var connectBtn: MaterialButton
     private lateinit var disconnectBtn: MaterialButton
     private var pulse: ObjectAnimator? = null
@@ -56,18 +48,17 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        peer = findViewById(R.id.peer)
-        secret = findViewById(R.id.secret)
         link = findViewById(R.id.link)
         token = findViewById(R.id.token)
-        serverPub = findViewById(R.id.server_pub)
-        identity = findViewById(R.id.identity)
-        devicePubkey = findViewById(R.id.device_pubkey)
         connectBtn = findViewById(R.id.connect)
         disconnectBtn = findViewById(R.id.disconnect)
-        ensureWgKeypair()
+
+        Prefs.ensureWgKeypair(this)
         loadPrefs()
 
+        findViewById<ImageButton>(R.id.settings).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
         findViewById<MaterialButton>(R.id.getToken).setOnClickListener {
             savePrefs()
             val l = link.text.toString().trim()
@@ -83,6 +74,11 @@ class MainActivity : AppCompatActivity() {
                 VpnState.S.CONNECTING -> Toast.makeText(this, "Connecting…", Toast.LENGTH_SHORT).show()
                 VpnState.S.OFF -> {
                     savePrefs()
+                    if (!settingsReady()) {
+                        Toast.makeText(this, "Заполни настройки (⚙): VPS, secret, server key", Toast.LENGTH_LONG).show()
+                        startActivity(Intent(this, SettingsActivity::class.java))
+                        return@setOnClickListener
+                    }
                     val prep = VpnService.prepare(this)
                     if (prep != null) consent.launch(prep) else startVpn()
                 }
@@ -104,6 +100,16 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         VpnState.listener = null
         VpnState.errorListener = null
+    }
+
+    // settingsReady checks the one-time config (in Settings) is filled before we try
+    // to connect, so the user gets a clear nudge instead of an opaque failure.
+    private fun settingsReady(): Boolean {
+        val p = Prefs.of(this)
+        return !p.getString("peer", "").isNullOrBlank() &&
+            !p.getString("secret", "").isNullOrBlank() &&
+            !p.getString("server_pub", "").isNullOrBlank() &&
+            !p.getString("wgkey", "").isNullOrBlank()
     }
 
     // render reflects the connection status in the Connect button: a calm violet
@@ -162,71 +168,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVpn() {
+        val p = Prefs.of(this)
         val intent = Intent(this, TurnvpnService::class.java)
-            .putExtra(TurnvpnService.EXTRA_PEER, peer.text.toString().trim())
-            .putExtra(TurnvpnService.EXTRA_SECRET, secret.text.toString().trim())
+            .putExtra(TurnvpnService.EXTRA_PEER, p.getString("peer", "").orEmpty().trim())
+            .putExtra(TurnvpnService.EXTRA_SECRET, p.getString("secret", "").orEmpty().trim())
             .putExtra(TurnvpnService.EXTRA_LINK, link.text.toString().trim())
             .putExtra(TurnvpnService.EXTRA_TOKEN, token.text.toString().trim())
-            .putExtra(TurnvpnService.EXTRA_WGKEY, prefs().getString("wgkey", ""))
-            .putExtra(TurnvpnService.EXTRA_WGSERVERPUB, serverPub.text.toString().trim())
+            .putExtra(TurnvpnService.EXTRA_WGKEY, p.getString("wgkey", "").orEmpty())
+            .putExtra(TurnvpnService.EXTRA_WGSERVERPUB, p.getString("server_pub", "").orEmpty().trim())
             .putExtra(TurnvpnService.EXTRA_WGADDR, TurnvpnService.DEFAULT_WGADDR)
-            .putExtra(TurnvpnService.EXTRA_IDENTITY, identity.text.toString().trim())
+            .putExtra(TurnvpnService.EXTRA_IDENTITY, p.getString("identity", "").orEmpty().trim())
         startService(intent)
     }
 
-    // Keystore-backed encrypted storage for the VPS/secret/link/token, so the shared
-    // secret is not readable in plaintext on a rooted or imaged device.
-    private val securePrefs: SharedPreferences by lazy {
-        val master = MasterKey.Builder(this)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        EncryptedSharedPreferences.create(
-            this,
-            "turnvpn_secure",
-            master,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-        )
-    }
-
-    private fun prefs() = securePrefs
-
     private fun loadPrefs() {
-        val p = prefs()
-        peer.setText(p.getString("peer", ""))
-        secret.setText(p.getString("secret", ""))
+        val p = Prefs.of(this)
         link.setText(p.getString("link", ""))
         token.setText(p.getString("token", ""))
-        serverPub.setText(p.getString("server_pub", ""))
-        identity.setText(p.getString("identity", ""))
-        devicePubkey.text = "ключ этого устройства (в peers сервера):\n" + p.getString("wgpub", "")
     }
 
     private fun savePrefs() {
-        prefs().edit()
-            .putString("peer", peer.text.toString().trim())
-            .putString("secret", secret.text.toString().trim())
+        Prefs.of(this).edit()
             .putString("link", link.text.toString().trim())
             .putString("token", token.text.toString().trim())
-            .putString("server_pub", serverPub.text.toString().trim())
-            .putString("identity", identity.text.toString().trim())
             .apply()
-    }
-
-    // ensureWgKeypair generates this device's WireGuard keypair once and stores the
-    // private half in the Keystore-backed prefs. The public half is shown so the
-    // operator can add it to the server's peers file.
-    private fun ensureWgKeypair() {
-        val p = prefs()
-        if (!p.getString("wgkey", "").isNullOrBlank()) return
-        try {
-            val pair = Turnvpn.generateWGKeypair() // "privateHex publicHex"
-            val parts = pair.trim().split(" ")
-            if (parts.size == 2) {
-                p.edit().putString("wgkey", parts[0]).putString("wgpub", parts[1]).apply()
-            }
-        } catch (e: Exception) {
-            Log.e("turnvpn", "wg keypair generation failed: ${e.message}", e)
-        }
     }
 }
