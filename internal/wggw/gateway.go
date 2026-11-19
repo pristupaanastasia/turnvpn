@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,13 +46,20 @@ import (
 
 const nicID = 1
 
+// Peer is an authorized WireGuard client: its hex public key and the tunnel
+// address range it may use as source, e.g. AllowedIP "10.6.0.2/32".
+type Peer struct {
+	PubKey    string
+	AllowedIP string
+}
+
 // Config configures a Gateway.
 type Config struct {
-	// ServerPrivKey and PeerPubKey are hex-encoded X25519 keys (WireGuard UAPI
-	// format). PeerAllowedIP is the client's tunnel address, e.g. "10.6.0.2/32".
+	// ServerPrivKey is the gateway's hex-encoded X25519 private key (WireGuard UAPI
+	// format). Peers are the clients allowed to connect; a given carrier conn only
+	// completes a handshake with the one peer whose key the connecting client holds.
 	ServerPrivKey string
-	PeerPubKey    string
-	PeerAllowedIP string
+	Peers         []Peer
 
 	// MTU of the inner tunnel. Must leave room for WireGuard (~32 B) and the DTLS
 	// record inside a TURN ChannelData datagram. Default 1280.
@@ -93,8 +101,7 @@ func New(carrier net.Conn, cfg Config) (*Gateway, error) {
 		cfg.Logf = func(string, ...any) {}
 	}
 	if cfg.Dial == nil {
-		d := &net.Dialer{Timeout: 10 * time.Second}
-		cfg.Dial = d.DialContext
+		cfg.Dial = safeDial // SSRF-safe by default
 	}
 
 	link := newLinkTun(cfg.MTU)
@@ -130,15 +137,18 @@ func New(carrier net.Conn, cfg Config) (*Gateway, error) {
 	udpFwd := udp.NewForwarder(stk, g.handleUDP)
 	stk.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 
+	if len(cfg.Peers) == 0 {
+		link.Close()
+		stk.Close()
+		return nil, fmt.Errorf("wggw: no peers configured")
+	}
 	dev := device.NewDevice(link, wgbind.New(carrier), device.NewLogger(device.LogLevelError, "wggw "))
-	uapi := fmt.Sprintf(""+
-		"private_key=%s\n"+
-		"listen_port=0\n"+
-		"replace_peers=true\n"+
-		"public_key=%s\n"+
-		"allowed_ip=%s\n",
-		cfg.ServerPrivKey, cfg.PeerPubKey, cfg.PeerAllowedIP)
-	if err := dev.IpcSet(uapi); err != nil {
+	var uapi strings.Builder
+	fmt.Fprintf(&uapi, "private_key=%s\nlisten_port=0\nreplace_peers=true\n", cfg.ServerPrivKey)
+	for _, p := range cfg.Peers {
+		fmt.Fprintf(&uapi, "public_key=%s\nallowed_ip=%s\n", p.PubKey, p.AllowedIP)
+	}
+	if err := dev.IpcSet(uapi.String()); err != nil {
 		dev.Close()
 		stk.Close()
 		return nil, fmt.Errorf("wggw: ipc: %w", err)

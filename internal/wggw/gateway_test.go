@@ -67,8 +67,7 @@ func TestGatewayExit(t *testing.T) {
 	// --- server: WireGuard exit gateway over srvCarrier ---
 	gw, err := wggw.New(srvCarrier, wggw.Config{
 		ServerPrivKey: serverPriv,
-		PeerPubKey:    clientPub,
-		PeerAllowedIP: clientIP + "/32",
+		Peers:         []wggw.Peer{{PubKey: clientPub, AllowedIP: clientIP + "/32"}},
 		MTU:           1420,
 		Logf:          t.Logf,
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
