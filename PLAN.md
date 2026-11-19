@@ -99,10 +99,10 @@ handshake сквозь relay на VPS, DTLS-эхо назад.
 - [x] **Проверено:** `curl --socks5-hostname …` → exit-IP = VPS; `example.com` → `HTTP/2 200`.
       Реальный браузинг через TURN ВК (из белого списка) работает **без WireGuard, без root**.
 
-### Stage 4 — WireGuard как data plane  ✅ **ПРОЙДЕН (локально, 2026-11-19)** ⬅️ **СЕЙЧАС ЗДЕСЬ**
+### Stage 4 — WireGuard как data plane  ✅ **ПРОЙДЕН, подтверждён вживую (2026-11-19)**
 Разворот: `KCP/smux/SOCKS` поверх DTLS заменены на **WireGuard** (внутри того же
-DTLS-over-TURN carrier — сырой WG реле дропнет). Всё в userspace на gvisor-netstack,
-**без root/TUN**.
+DTLS-over-TURN carrier — сырой WG реле дропнет). Десктоп — в userspace на
+gvisor-netstack (**без root/TUN**), Android — `wireguard-go` на реальном VpnService-tun.
 - [x] `internal/wgbind` — `conn.Bind`, возящий WG поверх carrier-`net.Conn`.
 - [x] `internal/wggw` — серверный WG-выход: netstack(promiscuous) + TCP/UDP-форвардеры
       → `net.Dial` в интернет; SSRF-guard по умолчанию; non-root.
@@ -111,11 +111,12 @@ DTLS-over-TURN carrier — сырой WG реле дропнет). Всё в use
       ключи — `-genkey`/`-wg-key`/`-wg-peers`/`-wg-server-pub`.
 - [x] Доказано локально: `TestClientDialThroughGateway`, `TestGatewayOverRealDTLS`
       (поверх настоящего pion/dtls), `-race` чисто.
-- [x] Редеплой VPS (WG-выход живой, слушает :56000) — живой прогон через реальный
-      TURN ждёт call-token.
+- [x] Редеплой VPS (WG-выход живой, non-root, слушает :56000).
 - [x] Миграция Android-ядра на WG (`mobile.Start` на VpnService-tun) + удаление
       мёртвого `internal/{mux,tunnel,vpntun}`; `internal/carrier` выделен общим.
-      Осталось: собрать `.aar`/APK и обкатать на эмуляторе.
+- [x] **Живой end-to-end:** собран `.aar`+APK, прогон на эмуляторе — HolubVPN через
+      реальный TURN-реле VK выпускает трафик через VPS (`api.ipify.org` → IP VPS).
+      Поймал баг порядка полей creds в `carrier` (фикс в PR #5).
 
 ### Stage 5 — устойчивость  ✅ **ПРОЙДЕН**
 - [x] Пул параллельных туннелей для throughput (`-tunnels N`, round-robin).
@@ -159,7 +160,11 @@ DTLS-over-TURN carrier — сырой WG реле дропнет). Всё в use
       (шейп+ротация есть), но на невидимость не рассчитываем. **Отказались:** массовое
       создание аккаунтов; авто-обход капчи.
 
-### Stage 10 — Android-клиент
+### Stage 10 — Android-клиент  ✅ **ПРОЙДЕН (WireGuard, подтверждён вживую 2026-11-19)**
+- [x] **WireGuard-приложение HolubVPN** — `mobile.Start` гоняет `wireguard-go` прямо на
+      VpnService-tun (без tun2socks/SOCKS); капча решается человеком в WebView,
+      токен ловится хуком. `.aar`+APK собраны, прогон на эмуляторе: трафик через
+      реальный TURN-реле VK выходит через VPS (`api.ipify.org` → IP VPS).
 - [ ] **Существующие приложения** есть в экосистеме `cacggghp/vk-turn-proxy`:
       `samosvalishe/turn-proxy-android` (Kotlin, Material 3, автоапдейты),
       `kiper292/wireguard-turn-android` (встроен в WireGuard), `oxsidee/vkpn`
@@ -171,12 +176,9 @@ DTLS-over-TURN carrier — сырой WG реле дропнет). Всё в use
       Go-клиент под `linux/arm64` (+ `arm`), запускается в **Termux** как на компе
       (SOCKS5 на `127.0.0.1:1080`). Капчу решает человек в браузере телефона. Доки — в
       `README.md`. Осталось: удобный SOCKS5→tun маршрут на телефоне (tun2socks).
-- [x] **Полный путь — СОБРАН (APK):** `mobile/` (gomobile-биндинг) = `vpntun` (туннель
-      как Dialer) + `xjasonlyu/tun2socks`; `./scripts/build.sh aar` → `.aar`. Приложение
-      `android/` (Kotlin + `VpnService`) собирается в APK (`./gradlew assembleDebug`).
-      DNS через туннель по TCP автоматически; UDP/QUIC — через ненадёжную дорожку (Stage 7).
-      Оговорки: arm64-only.
-- [x] UDP/QUIC добавлен (Stage 7) и проверен на эмуляторе (`cloudflare-quic.com` → HTTP/3).
+- [x] ~~Полный путь (APK) на tun2socks+`vpntun`~~ — **заменён на WireGuard** (см. выше;
+      `vpntun`/tun2socks удалены). Сборка: `./scripts/build.sh aar` → `.aar`, затем
+      `./gradlew assembleDebug` → APK. arm64-only.
 - [ ] Обкатать APK на реальном устройстве (пока проверено на эмуляторе).
 
 ---

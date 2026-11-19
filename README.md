@@ -175,14 +175,16 @@ QUIC/HTTP-3 и прочий UDP идут через туннель наравн�
 
 ## Статус
 
-Vector 1 (TURN-реле + DTLS + **WireGuard**) **работает end-to-end**: реальный
-HTTPS-браузинг и QUIC/HTTP-3 выходят через VPS по инфраструктуре VK из белых списков,
-с проактивным обновлением кредов. Data plane переведён с KCP/smux/SOCKS на WireGuard
-(десктоп готов и проверен локально; Android пока на старом протоколе). Поднят
-харденинг: взаимная аутентификация
-(единый секрет или per-client keyring), SSRF-guard на выходе, non-root systemd на
-VPS, секрет в Keystore на Android, шейп битрейта и ротация выходов. Полная история —
-в `PLAN.md` и `LAB.md`, включая удалённый (в git-истории) ранний media-RTP подход.
+Vector 1 (TURN-реле + DTLS + **WireGuard**) **работает end-to-end**, в том числе на
+Android: реальный HTTPS-браузинг и QUIC/HTTP-3 выходят через VPS по инфраструктуре VK
+из белых списков, с проактивным обновлением кредов. Data plane — **WireGuard** и на
+десктопе (`cmd/client`/`cmd/server`), и в Android-ядре (`wireguard-go` на
+VpnService-tun); старый KCP/smux/SOCKS/tun2socks удалён. Подтверждено вживую: приложение
+**HolubVPN** через реальный TURN-реле VK выпускает трафик через VPS (в браузере
+эмулятора `api.ipify.org` вернул IP VPS). Поднят харденинг: взаимная аутентификация
+(единый секрет или per-client keyring), SSRF-guard на выходе, non-root systemd на VPS,
+секрет и приватный WG-ключ в Android Keystore. Полная история — в `PLAN.md` и `LAB.md`,
+включая удалённый (в git-истории) ранний media-RTP подход.
 
 ---
 
@@ -350,10 +352,13 @@ gomobile `.aar`: WireGuard on the tun → our tunnel) lives in
 
 ## Status
 
-Vector 1 (TURN relay + DTLS + **WireGuard**) is **working end-to-end**: real HTTPS
-browsing and QUIC/HTTP-3 exit via the VPS over whitelisted VK infrastructure, with
-proactive credential refresh. The data plane moved from KCP/smux/SOCKS to WireGuard
-(desktop done and verified locally; Android still on the old protocol). Hardening is
-in place: mutual DTLS authentication (a single secret or a per-client keyring), an
-SSRF guard on the exit (on by default), a non-root systemd service on the VPS, and
-the secret in the Android Keystore. See `PLAN.md` and `LAB.md` for the full history.
+Vector 1 (TURN relay + DTLS + **WireGuard**) is **working end-to-end**, Android
+included: real HTTPS browsing and QUIC/HTTP-3 exit via the VPS over whitelisted VK
+infrastructure, with proactive credential refresh. The data plane is **WireGuard** on
+both desktop (`cmd/client`/`cmd/server`) and the Android core (`wireguard-go` on the
+VpnService tun); the old KCP/smux/SOCKS/tun2socks path is gone. Proven live: the
+**HolubVPN** app, through a real VK TURN relay, egresses via the VPS (`api.ipify.org`
+in the emulator browser returned the VPS IP). Hardening is in place: mutual DTLS
+authentication (a single secret or a per-client keyring), an SSRF guard on the exit
+(on by default), a non-root systemd service on the VPS, and the secret plus the WG
+private key in the Android Keystore. See `PLAN.md` and `LAB.md` for the full history.
