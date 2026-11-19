@@ -124,16 +124,23 @@ func Dial(ctx context.Context, cfg Config) (net.Conn, []io.Closer, error) {
 // TokenCreds returns a Creds that derives turn_server from a VK call using a call
 // token obtained out of band (human-in-the-loop; no captcha solving here).
 func TokenCreds(appKey, link, token string) Creds {
+	return tokenCreds(appKey, link, token, "")
+}
+
+// tokenCreds is TokenCreds with an injectable OK API base (empty = default), so the
+// field mapping can be tested without reaching the real VK/OK servers.
+func tokenCreds(appKey, link, token, apiServer string) Creds {
 	return func(ctx context.Context) (user, pass, addr string, err error) {
 		// fetchTurnCreds returns (addr, user, pass); Creds yields (user, pass, addr).
-		addr, user, pass, err = fetchTurnCreds(ctx, appKey, link, token)
+		addr, user, pass, err = fetchTurnCreds(ctx, appKey, link, token, apiServer)
 		return user, pass, addr, err
 	}
 }
 
 // fetchTurnCreds runs the minimal OK join to extract the call's TURN credentials.
-func fetchTurnCreds(ctx context.Context, appKey, link, token string) (addr, user, pass string, err error) {
-	cl := &okapi.Client{AppKey: appKey, HTTP: &http.Client{Timeout: 30 * time.Second}}
+// apiServer overrides the OK API base (empty = default).
+func fetchTurnCreds(ctx context.Context, appKey, link, token, apiServer string) (addr, user, pass string, err error) {
+	cl := &okapi.Client{AppKey: appKey, APIServer: apiServer, HTTP: &http.Client{Timeout: 30 * time.Second}}
 	if _, err = cl.AnonymLogin(ctx, uuid.NewString()); err != nil {
 		return "", "", "", fmt.Errorf("anonymLogin: %w", err)
 	}
