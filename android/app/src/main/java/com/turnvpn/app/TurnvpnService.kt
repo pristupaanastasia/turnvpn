@@ -12,7 +12,9 @@ import androidx.core.app.NotificationCompat
 import com.turnvpn.turnvpn.Turnvpn
 
 // TurnvpnService establishes a VPN tun interface and hands its file descriptor to the
-// Go core (tun2socks -> turnvpn tunnel). TCP only; see the Go side for the UDP note.
+// Go core, which runs a WireGuard device on it over the turnvpn transport
+// (TURN + PSK-DTLS) to the VPS exit. WireGuard routes the whole device (TCP, UDP,
+// QUIC); DNS resolves at the exit.
 class TurnvpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
@@ -35,10 +37,13 @@ class TurnvpnService : VpnService() {
     private fun startVpn(intent: Intent) {
         var goFd = -1
         try {
+            val wgAddr = intent.getStringExtra(EXTRA_WGADDR)?.ifBlank { null } ?: DEFAULT_WGADDR
             val builder = Builder()
                 .setSession("turnvpn")
-                .setMtu(1500)
-                .addAddress("10.0.0.2", 32)
+                // WireGuard rides inside DTLS inside a TURN datagram, so keep the inner
+                // MTU small to leave room for all the encapsulation.
+                .setMtu(1280)
+                .addAddress(wgAddr, 32)
                 .addDnsServer("1.1.1.1")
                 .addRoute("0.0.0.0", 0)
             // Keep this app out of the tunnel so control/credential traffic (and
@@ -59,12 +64,15 @@ class TurnvpnService : VpnService() {
 
             Turnvpn.start(
                 goFd.toLong(),
-                1500L,
+                1280L,
                 intent.getStringExtra(EXTRA_PEER) ?: "",
                 intent.getStringExtra(EXTRA_SECRET) ?: "",
                 intent.getStringExtra(EXTRA_LINK) ?: "",
                 intent.getStringExtra(EXTRA_TOKEN) ?: "",
                 intent.getStringExtra(EXTRA_APPKEY) ?: DEFAULT_APPKEY,
+                intent.getStringExtra(EXTRA_WGKEY) ?: "",
+                intent.getStringExtra(EXTRA_WGSERVERPUB) ?: "",
+                wgAddr,
             )
             goFd = -1 // ownership handed to Go; the engine closes it on Stop()
             Log.i(TAG, "turnvpn started")
@@ -138,6 +146,10 @@ class TurnvpnService : VpnService() {
         const val EXTRA_LINK = "link"
         const val EXTRA_TOKEN = "token"
         const val EXTRA_APPKEY = "appkey"
+        const val EXTRA_WGKEY = "wgkey"
+        const val EXTRA_WGSERVERPUB = "wgserverpub"
+        const val EXTRA_WGADDR = "wgaddr"
         const val DEFAULT_APPKEY = "CGMMEJLGDIHBABABA"
+        const val DEFAULT_WGADDR = "10.6.0.2"
     }
 }

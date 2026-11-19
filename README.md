@@ -106,8 +106,8 @@ egress'ом на внешний IP палятся трафик-анализом.
 - `internal/socks` — SOCKS5 CONNECT и UDP ASSOCIATE + per-stream target-заголовок.
 - `internal/authdtls` — взаимная PSK-аутентификация DTLS (ECDHE-PSK); поддерживает
   как единый `-secret`, так и per-client keyring (identity→secret) с отзывом.
-- `internal/mux`, `internal/tunnel` — **legacy** KCP/smux data plane; используются
-  только мобильным `internal/vpntun` (Android ещё на старом протоколе).
+- `internal/carrier` — установка несущего слоя (креды → TURN Allocate → PSK-DTLS),
+  общая для десктопа и Android.
 - `internal/captcha` — пользовательский добытчик кредов (с решением капчи), втыкается
   в seam `CredsFunc` клиента. **Не часть ядра**; turnvpn сам капчу не решает.
 
@@ -170,7 +170,7 @@ QUIC/HTTP-3 и прочий UDP идут через туннель наравн�
 ## Android
 
 Нативное приложение **HolubVPN** (Kotlin + `VpnService`, Go-ядро через gomobile
-`.aar`: tun2socks читает tun → туннель) — в каталоге [`android/`](android/README.md):
+`.aar`: WireGuard на tun → туннель) — в каталоге [`android/`](android/README.md):
 там сборка APK, запуск и оговорки. DNS идёт через туннель по TCP автоматически.
 
 ## Статус
@@ -286,8 +286,8 @@ detectable by traffic analysis. Footprint can be reduced (e.g. exit rotation via
 - `internal/socks` — SOCKS5 CONNECT and UDP ASSOCIATE + per-stream target header.
 - `internal/authdtls` — mutual PSK DTLS authentication (ECDHE-PSK); supports a single
   `-secret` or a per-client keyring (identity→secret) with revocation.
-- `internal/mux`, `internal/tunnel` — **legacy** KCP/smux data plane; kept only for
-  the mobile `internal/vpntun` (Android is still on the old protocol).
+- `internal/carrier` — brings the transport up (creds → TURN allocate → PSK-DTLS),
+  shared by the desktop client and Android.
 - `internal/captcha` — a user-supplied captcha fetcher that plugs into the
   client's `CredsFunc` seam. **Not part of the core.**
 
@@ -345,7 +345,7 @@ the exit).
 ## Android
 
 The native Android app **HolubVPN** (Kotlin + `VpnService`, Go core bound through a
-gomobile `.aar`: tun2socks reads the tun → our tunnel) lives in
+gomobile `.aar`: WireGuard on the tun → our tunnel) lives in
 [`android/`](android/README.md), with its own build & run notes.
 
 ## Status

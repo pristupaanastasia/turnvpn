@@ -1,144 +1,133 @@
 // Package turnvpn is the gomobile-bindable entry point for the Android client.
 // Kotlin calls Start() with the VpnService tun file descriptor; this runs a
-// tun2socks engine that routes the device's TCP traffic through the turnvpn tunnel
-// (TURN + PSK-DTLS + KCP/smux) to the VPS exit.
-//
-// The tunnel carries TCP only, so UDP flows are refused. Enable Private DNS
-// (DNS-over-TLS, which is TCP) on the device so name resolution rides the tunnel;
-// QUIC (UDP/443) falls back to TCP in browsers.
+// WireGuard device directly on that tun, carried over the turnvpn transport
+// (TURN + PSK-DTLS) to the VPS exit, which terminates WireGuard and egresses to
+// the open internet. WireGuard routes the whole device (TCP, UDP and QUIC), so no
+// tun2socks and no DNS-over-TCP shim are needed; DNS resolves at the exit.
 package turnvpn
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net"
-	"net/url"
-	"strconv"
 	"sync"
 	"time"
 
-	"github.com/xjasonlyu/tun2socks/v2/engine"
-	M "github.com/xjasonlyu/tun2socks/v2/metadata"
-	"github.com/xjasonlyu/tun2socks/v2/proxy"
+	"golang.zx2c4.com/wireguard/device"
 
-	"github.com/pristupaanastasia/turnvpn/internal/vpntun"
+	"github.com/pristupaanastasia/turnvpn/internal/carrier"
+	"github.com/pristupaanastasia/turnvpn/internal/wgbind"
 )
 
 var state struct {
 	mu      sync.Mutex
-	dialer  *vpntun.Dialer
+	dev     *device.Device
+	closers []io.Closer
 	running bool
 }
 
-func init() {
-	// Register a proxy scheme the engine resolves to the live turnvpn tunnel.
-	proxy.RegisterProtocol("turntun", func(*url.URL) (proxy.Proxy, error) {
-		return tunProxy{}, nil
-	})
+func closeAll(cs []io.Closer) {
+	for i := len(cs) - 1; i >= 0; i-- {
+		_ = cs[i].Close()
+	}
 }
 
-// tunProxy routes tun2socks flows through the active turnvpn tunnel.
-type tunProxy struct{}
-
-func (tunProxy) DialContext(ctx context.Context, m *M.Metadata) (net.Conn, error) {
-	state.mu.Lock()
-	d := state.dialer
-	state.mu.Unlock()
-	if d == nil {
-		return nil, errors.New("turnvpn: not started")
-	}
-	return d.Dial(ctx, "tcp", m.DestinationAddrPort().String())
-}
-
-func (tunProxy) DialUDP(m *M.Metadata) (net.PacketConn, error) {
-	state.mu.Lock()
-	d := state.dialer
-	state.mu.Unlock()
-	if d == nil {
-		return nil, errors.New("turnvpn: not started")
-	}
-	// DNS stays on the DNS-over-TCP shim (works even with servers predating the
-	// UDP relay); other UDP (QUIC, etc.) is relayed as framed datagrams.
-	if m.DstPort == 53 {
-		return newDNSPacketConn(d, m), nil
-	}
-	flow, err := d.OpenUDP(m.DestinationAddress())
-	if err != nil {
-		return nil, err
-	}
-	return newUDPConn(flow, m.UDPAddr()), nil
-}
-
-// Start brings up the VPN: it builds the tunnel (credentials from the VK call token)
-// and starts a tun2socks engine on tunFd routing the device's traffic through it.
+// Start brings up the VPN: it establishes the DTLS-over-TURN carrier (credentials
+// from the VK call token) and runs a WireGuard device on tunFd over it.
 //
-//	tunFd  — the VpnService tun file descriptor
-//	mtu    — the tun MTU (e.g. 1500)
-//	peer   — the VPS exit "host:port" (running cmd/server)
-//	secret — the shared PSK, must match the server
-//	vkLink — the token from vk.ru/call/join/<token>
-//	token  — the per-call guest token captured from a browser (past the captcha)
-//	appKey — the OK application key (public web-client key)
+//	tunFd       — the VpnService tun file descriptor (an independent dup; see Kotlin)
+//	mtu         — the tun MTU
+//	peer        — the VPS exit "host:port" (running cmd/server)
+//	secret      — the shared DTLS PSK, must match the server
+//	vkLink      — the token from vk.ru/call/join/<token>
+//	token       — the per-call guest token captured from a browser (past the captcha)
+//	appKey      — the OK application key (public web-client key)
+//	wgKey       — this device's WireGuard private key (hex; kept in the Keystore)
+//	wgServerPub — the server's WireGuard public key (hex)
+//	wgAddr      — this device's WireGuard tunnel address (e.g. "10.6.0.2")
 //
 // It returns an error if already running or on setup failure.
-func Start(tunFd int, mtu int, peer, secret, vkLink, token, appKey string) error {
+func Start(tunFd, mtu int, peer, secret, vkLink, token, appKey, wgKey, wgServerPub, wgAddr string) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.running {
 		return errors.New("turnvpn: already running")
 	}
-	d, err := vpntun.New(vpntun.Config{
-		PeerAddr: peer,
-		Secret:   secret,
-		Creds:    vpntun.TokenCreds(appKey, vkLink, token),
+
+	peerAddr, err := net.ResolveUDPAddr("udp4", peer)
+	if err != nil {
+		return fmt.Errorf("turnvpn: resolve peer %q: %w", peer, err)
+	}
+
+	// Establish the carrier (bounded; surfaces credential/TURN/DTLS failures here so
+	// the UI only shows "connected" once it succeeds).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	carrierConn, closers, err := carrier.Dial(ctx, carrier.Config{
+		Peer:   peerAddr,
+		Secret: secret,
+		Creds:  carrier.TokenCreds(appKey, vkLink, token),
+		Logf:   GoLog,
 	})
 	if err != nil {
 		return err
 	}
-	state.dialer = d
 
-	// Bring the tunnel up now so credential/TURN/DTLS failures surface here
-	// (the UI shows "connected" only once this succeeds), bounded by a timeout.
-	errc := make(chan error, 1)
-	go func() { errc <- d.Connect() }()
-	select {
-	case err := <-errc:
-		if err != nil {
-			_ = d.Close()
-			state.dialer = nil
-			return err
-		}
-	case <-time.After(25 * time.Second):
-		_ = d.Close()
-		state.dialer = nil
-		return errors.New("turnvpn: connect timed out")
+	tunDev, err := makeTUN(tunFd, mtu)
+	if err != nil {
+		closeAll(closers)
+		return err
 	}
 
-	engine.Insert(&engine.Key{
-		MTU:      mtu,
-		Device:   "fd://" + strconv.Itoa(tunFd),
-		Proxy:    "turntun://turnvpn",
-		LogLevel: "warning",
-	})
-	engine.Start()
+	dev := device.NewDevice(tunDev, wgbind.New(carrierConn), device.NewLogger(device.LogLevelError, "turnvpn "))
+	uapi := fmt.Sprintf(""+
+		"private_key=%s\n"+
+		"listen_port=0\n"+
+		"replace_peers=true\n"+
+		"public_key=%s\n"+
+		"endpoint=127.0.0.1:1\n"+ // dummy; wgbind ignores it (one carrier = one peer)
+		"allowed_ip=0.0.0.0/0\n"+
+		"allowed_ip=::/0\n"+
+		"persistent_keepalive_interval=25\n",
+		wgKey, wgServerPub)
+	if err := dev.IpcSet(uapi); err != nil {
+		dev.Close()
+		closeAll(closers)
+		return fmt.Errorf("turnvpn: wireguard config: %w", err)
+	}
+	if err := dev.Up(); err != nil {
+		dev.Close()
+		closeAll(closers)
+		return fmt.Errorf("turnvpn: wireguard up: %w", err)
+	}
+
+	state.dev = dev
+	state.closers = closers
 	state.running = true
 	return nil
 }
 
-// Stop tears down the engine and the tunnel.
+// Stop tears down the WireGuard device and the carrier.
 func Stop() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if !state.running {
 		return
 	}
-	engine.Stop()
-	if state.dialer != nil {
-		_ = state.dialer.Close()
-		state.dialer = nil
+	if state.dev != nil {
+		state.dev.Close()
+		state.dev = nil
 	}
+	closeAll(state.closers)
+	state.closers = nil
 	state.running = false
 }
 
 // Hello is a trivial sanity call usable from Kotlin to verify the binding.
 func Hello() string { return "turnvpn gomobile ok" }
+
+// GoLog is a no-op by default; Kotlin may override logging by other means. It
+// matches the carrier Logf shape.
+func GoLog(string, ...any) {}
